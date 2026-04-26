@@ -1,0 +1,26 @@
+[Unit]
+Description=Proton Drive bidirectional sync daemon
+Documentation=https://rclone.org/protondrive/
+# Espera a rede estar realmente up (NetworkManager-wait-online é
+# para o nível user; para nível user, dependemos do default.target).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/drive-sync
+# Reinício automático em falha — backoff progressivo evita loop quente.
+Restart=on-failure
+RestartSec=15
+# Limita o impacto na máquina (não atrapalhar outras aplicações).
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Hardening básico — não precisa de root nem de namespace especial.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-write
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

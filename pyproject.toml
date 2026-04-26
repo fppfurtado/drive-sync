@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drive-sync"
+version = "0.1.0"
+description = "Sincronização bidirecional de pastas locais com Proton Drive (via rclone bisync)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Você" }]
+dependencies = [
+    "watchdog>=4.0",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+drive-sync = "protondrive_sync.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["protondrive_sync*"]
