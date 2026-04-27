@@ -37,8 +37,6 @@ PYTHON = [
     ".mypy_cache/**",
     ".ruff_cache/**",
     "*.egg-info/**",
-    "build/**",
-    "dist/**",
 ]
 
 JS_TS = [
@@ -49,8 +47,6 @@ JS_TS = [
     ".svelte-kit/**",
     ".parcel-cache/**",
     ".vite/**",
-    "dist/**",
-    "out/**",
     ".pnpm-store/**",
     "yarn-error.log",
 ]
@@ -65,9 +61,7 @@ GO = [
 ]
 
 JAVA_KOTLIN = [
-    "build/**",
     ".gradle/**",
-    "out/**",
     "*.class",
 ]
 
@@ -81,6 +75,9 @@ EDITOR = [
 ]
 
 GENERAL = [
+    "build/**",
+    "dist/**",
+    "out/**",
     "*.log",
     "*.tmp",
     "*.bak",
