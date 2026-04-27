@@ -1,4 +1,4 @@
-"""Entrypoint executável: `python -m protondrive_sync` ou `drive-sync`."""
+"""Entrypoint executável: `python -m drive_sync` ou `drive-sync`."""
 from __future__ import annotations
 
 import argparse

@@ -16,8 +16,8 @@ dependencies = [
 ]
 
 [project.scripts]
-drive-sync = "protondrive_sync.__main__:main"
+drive-sync = "drive_sync.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["protondrive_sync*"]
+include = ["drive_sync*"]
