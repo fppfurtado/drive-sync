@@ -77,6 +77,16 @@ class RcloneEngine:
     # -----------------------------------------------------------------
     # Sincronização bidirecional de uma pasta "comum" (não-Git)
     # -----------------------------------------------------------------
+    async def _ensure_remote_dir(self, remote: str, name: str) -> bool:
+        """Cria o diretório remoto se não existir. É idempotente."""
+        cmd = [self.app.rclone.binary, "mkdir", remote]
+        rc, _out, err = await _run(cmd)
+        if rc != 0:
+            log.error("[%s] Falha ao criar diretório remoto %s: %s", name, remote, err.strip()[-300:])
+            return False
+        log.debug("[%s] Diretório remoto garantido: %s", name, remote)
+        return True
+
     async def bisync_folder(self, folder: FolderConfig, local_override: Path | None = None) -> bool:
         """Executa bisync para uma tarefa. Retorna True em sucesso."""
         local = local_override or folder.local_path
@@ -84,6 +94,9 @@ class RcloneEngine:
         marker = _state_marker_for(local, remote)
 
         local.mkdir(parents=True, exist_ok=True)
+
+        if not await self._ensure_remote_dir(remote, folder.name):
+            return False
 
         cmd = self._base_cmd() + ["bisync", str(local), remote]
         # Resolução de conflitos: vence quem foi modificado por último.

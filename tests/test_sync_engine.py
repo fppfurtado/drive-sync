@@ -49,6 +49,15 @@ async def _fake_err(cmd: list[str]) -> tuple[int, str, str]:
     return (1, "", "rclone: something went wrong")
 
 
+def _bisync_calls(captured: list[list[str]]) -> list[list[str]]:
+    """Filtra apenas as chamadas de bisync (exclui mkdir)."""
+    return [c for c in captured if "bisync" in c]
+
+
+def _mkdir_calls(captured: list[list[str]]) -> list[list[str]]:
+    return [c for c in captured if "mkdir" in c]
+
+
 # ---------------------------------------------------------------------------
 # remote_uri_for
 # ---------------------------------------------------------------------------
@@ -93,7 +102,9 @@ async def test_first_run_adds_resync_flag(tmp_path, monkeypatch):
         result = await engine.bisync_folder(folder)
 
     assert result is True
-    assert "--resync" in captured[0]
+    bisync_cmds = _bisync_calls(captured)
+    assert len(bisync_cmds) == 1
+    assert "--resync" in bisync_cmds[0]
 
 
 async def test_subsequent_run_omits_resync(tmp_path, monkeypatch):
@@ -117,7 +128,9 @@ async def test_subsequent_run_omits_resync(tmp_path, monkeypatch):
         result = await engine.bisync_folder(folder)
 
     assert result is True
-    assert "--resync" not in captured[0]
+    bisync_cmds = _bisync_calls(captured)
+    assert len(bisync_cmds) == 1
+    assert "--resync" not in bisync_cmds[0]
 
 
 async def test_failed_bisync_returns_false(tmp_path, monkeypatch):
@@ -125,7 +138,13 @@ async def test_failed_bisync_returns_false(tmp_path, monkeypatch):
     engine = RcloneEngine(_app())
     folder = _folder(local_path=tmp_path / "local")
 
-    with patch("drive_sync.sync_engine._run", _fake_err):
+    # mkdir succeeds, bisync fails
+    async def fake_run(cmd):
+        if "mkdir" in cmd:
+            return (0, "", "")
+        return (1, "", "rclone: something went wrong")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
         result = await engine.bisync_folder(folder)
 
     assert result is False
@@ -170,7 +189,7 @@ async def test_auto_exclude_appends_preset_patterns(tmp_path, monkeypatch):
     with patch("drive_sync.sync_engine._run", fake_run):
         await engine.bisync_folder(folder)
 
-    cmd = captured[0]
+    cmd = _bisync_calls(captured)[0]
     assert "--exclude" in cmd
     assert "node_modules/**" in cmd
 
@@ -188,5 +207,63 @@ async def test_auto_exclude_false_skips_presets(tmp_path, monkeypatch):
     with patch("drive_sync.sync_engine._run", fake_run):
         await engine.bisync_folder(folder)
 
-    cmd = captured[0]
+    cmd = _bisync_calls(captured)[0]
     assert "node_modules/**" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _ensure_remote_dir — mkdir é chamado antes do bisync
+# ---------------------------------------------------------------------------
+
+async def test_mkdir_called_before_bisync(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    engine = RcloneEngine(_app())
+    folder = _folder(local_path=tmp_path / "local")
+    captured: list[list[str]] = []
+
+    async def fake_run(cmd):
+        captured.append(cmd)
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        await engine.bisync_folder(folder)
+
+    assert len(_mkdir_calls(captured)) == 1
+    assert captured.index(_mkdir_calls(captured)[0]) < captured.index(_bisync_calls(captured)[0])
+
+
+async def test_mkdir_failure_aborts_bisync(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    engine = RcloneEngine(_app())
+    folder = _folder(local_path=tmp_path / "local")
+    captured: list[list[str]] = []
+
+    async def fake_run(cmd):
+        captured.append(cmd)
+        if "mkdir" in cmd:
+            return (1, "", "rclone: mkdir failed")
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        result = await engine.bisync_folder(folder)
+
+    assert result is False
+    assert len(_bisync_calls(captured)) == 0
+
+
+async def test_mkdir_uses_correct_remote(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app(remote_name="proton", remote_root="Sync")
+    engine = RcloneEngine(app)
+    folder = _folder(remote_subpath="dev/projects", local_path=tmp_path / "local")
+    captured: list[list[str]] = []
+
+    async def fake_run(cmd):
+        captured.append(cmd)
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        await engine.bisync_folder(folder)
+
+    mkdir_cmd = _mkdir_calls(captured)[0]
+    assert "proton:Sync/dev/projects" in mkdir_cmd
