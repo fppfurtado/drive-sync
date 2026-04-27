@@ -3,3 +3,6 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local config (copy config/config.yaml.example to ~/.config/drive-sync/config.yaml)
+config/config.yaml

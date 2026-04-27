@@ -1,0 +1,145 @@
+# =============================================================================
+# drive-sync — example configuration
+# Copy to ~/.config/drive-sync/config.yaml and adjust for your environment.
+# =============================================================================
+
+rclone:
+  remote_name: "my-remote"          # name you gave the remote in `rclone config`
+  remote_root: "Sync"               # top-level folder inside the remote
+  binary: "rclone"
+  global_flags:
+    - "--transfers=4"
+    - "--checkers=8"
+    - "--retries=3"
+    - "--low-level-retries=10"
+    - "--track-renames"
+
+# -----------------------------------------------------------------------------
+# git_mode options:
+#   bisync  — full worktree + .git, minus build artifacts (preferred for code)
+#   bundle  — only a .gitbundle file (for repos with very large .git/ history)
+#   off     — no git handling (non-code folders)
+#
+# auto_exclude: true  adds common build-artifact globs (node_modules, .venv, …)
+# -----------------------------------------------------------------------------
+folders:
+
+  # ---------- Code ----------
+  - name: "dev-projects"
+    local_path: "~/dev/projects"
+    remote_subpath: "dev/projects"
+    git_mode: "bisync"
+    auto_exclude: true
+    debounce_seconds: 40
+    exclude:
+      - "*.local"
+
+  - name: "dev-scripts"
+    local_path: "~/dev/scripts"
+    remote_subpath: "dev/scripts"
+    git_mode: "bisync"
+    auto_exclude: true
+    debounce_seconds: 40
+
+  - name: "dotfiles"
+    local_path: "~/.dotfiles"
+    remote_subpath: "dotfiles"
+    git_mode: "bisync"
+    auto_exclude: true
+    debounce_seconds: 40
+
+  # ---------- Notes ----------
+  - name: "logseq-vault"
+    local_path: "~/Notes/Logseq"
+    remote_subpath: "notes/logseq"
+    git_mode: "bisync"
+    auto_exclude: true
+    debounce_seconds: 40            # Logseq saves aggressively
+    exclude:
+      - "logseq/.recycle/**"
+      - "logseq/bak/**"
+      - "logseq/version-files/**"
+
+  # ---------- Documents & media ----------
+  - name: "documents"
+    local_path: "~/Documents"
+    remote_subpath: "documents"
+    git_mode: "off"
+    auto_exclude: false
+    debounce_seconds: 10
+    exclude:
+      - "*.tmp"
+      - "~$*"                       # Office/LibreOffice locks
+
+  - name: "library"
+    local_path: "~/Library"
+    remote_subpath: "library"
+    git_mode: "off"
+    auto_exclude: false
+    debounce_seconds: 60
+    exclude:
+      - "**/.zotero/**"
+      - "*.tmp"
+
+  # ---------- Pictures ----------
+  - name: "pictures-photos"
+    local_path: "~/Pictures/Photos"
+    remote_subpath: "pictures/photos"
+    git_mode: "off"
+    auto_exclude: false
+    debounce_seconds: 120
+    exclude:
+      - "*.tmp"
+      - "**/.thumbnails/**"
+
+  - name: "pictures-screenshots"
+    local_path: "~/Pictures/Screenshots"
+    remote_subpath: "pictures/screenshots"
+    git_mode: "off"
+    auto_exclude: false
+    debounce_seconds: 5
+
+  - name: "pictures-assets"
+    local_path: "~/Pictures/Assets"
+    remote_subpath: "pictures/assets"
+    git_mode: "off"
+    auto_exclude: false
+    debounce_seconds: 15
+
+  # ---------- Videos ----------
+  - name: "videos"
+    local_path: "~/Videos"
+    remote_subpath: "videos"
+    git_mode: "off"
+    auto_exclude: false
+    debounce_seconds: 180
+    exclude:
+      - "*.tmp"
+      - "*.part"
+
+# -----------------------------------------------------------------------------
+# bundle mode: only useful for repos with a very large .git/ history.
+# Not referenced by any folder above (all use bisync or off).
+# -----------------------------------------------------------------------------
+git:
+  bundles_dir: "~/.cache/drive-sync/bundles"
+  bundle_suffix: ".gitbundle"
+  bundle_all: true
+  recursive_detection: true
+  max_recursion_depth: 4
+
+watcher:
+  queue_size: 2000
+  max_concurrent_jobs: 3
+  periodic_full_sync_seconds: 3600
+  startup_delay_seconds: 30
+
+dedupe:
+  skip_subpaths_of_configured_folders: true
+
+logging:
+  level: "INFO"
+  file: "~/.local/state/drive-sync/drive-sync.log"
+  max_bytes: 10485760               # 10 MiB
+  backup_count: 5
+  console: true
