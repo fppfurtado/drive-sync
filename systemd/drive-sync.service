@@ -19,7 +19,6 @@ IOSchedulingPriority=7
 # Hardening básico — não precisa de root nem de namespace especial.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-write
 PrivateTmp=yes
 
 [Install]
