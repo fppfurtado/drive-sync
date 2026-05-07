@@ -50,3 +50,11 @@ Se em qualquer ponto ressurgir `Code=8002`, abrir item separado no backlog: a se
 - Bloco 1 antes do Bloco 2 — código antes do teste evita teste vermelho em commits intermediários.
 - Teste de concorrência é frágil sob CI lento: usar margem confortável de tempo (sleeps de 50-100ms) e tolerância de ≥10ms na asserção de não-sobreposição. Não inflar — teste irritante é teste que será desabilitado.
 - `_run` hoje é privado (`_` prefix) e usado só por `RcloneEngine`. Importá-lo direto no teste é aceito (já há precedente em `test_sync_engine.py` importando `_state_marker_for`).
+
+## Pendências de validação
+
+A invariante (sessão Proton se mantém após serialização) só pode ser confirmada por observação prolongada. D0 já validado pelo operador (auth voltou após reativar). Falta confirmar:
+
+- **D0+1h** — `journalctl --user -u drive-sync --since "1h ago" | grep -c Code=8002` → `0` após pelo menos um `periodic_full_sync` ter rodado.
+- **D7** — `rclone config show proton | grep -E "client_(uid|salted_key_pass)"` ambos ainda populados; `journalctl --user -u drive-sync --since "7 days ago" | grep -c Code=8002` → `0`.
+- **D14+** — confirmação final (referência: relator de rclone#7381 reportou >1 semana após serializar).
