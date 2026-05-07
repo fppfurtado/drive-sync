@@ -1,0 +1,11 @@
+# Backlog
+
+## Próximos
+
+- sync_engine: serializar chamadas rclone (asyncio.Lock module-level envolvendo `_run`) para corrigir race condition no token refresh do backend protondrive — disparada quando ≥2 instâncias rclone fazem init do backend simultaneamente (cenário recorrente na nossa config: `periodic_full_sync` enfileira 12 pastas/h e `max_concurrent_jobs=3`). A cada ~5 dias zera `client_uid` e `client_salted_key_pass` no `rclone.conf`, exigindo reauth manual via TOTP. Causa-raiz isolada por /debug em 07/mai 2026 com concordância qualitativa de [rclone#7381](https://github.com/rclone/rclone/issues/7381) (mantenedor henrybear327). Fix é ~5 linhas + teste verificando que chamadas concorrentes serializam. Trade-off aceito: paralelismo dos workers vira ilusão (todo trabalho útil é rclone), mas o lock fica na fronteira correta — subprocess rclone, não a lógica de fila/dedup do daemon.
+
+- daemon: health-check de auth + pause-on-failure — detectar `Code=8002`/422 em qualquer job, marcar daemon como degraded (`sd_notify` ou similar), pausar workers e disparar `notify-send`. Hoje, falha de auth produz 26 erros/10min antes de qualquer sinalização (descobri por acaso 5 dias depois). Defesa em profundidade que vale mesmo com a serialização aplicada — qualquer erro de auth futuro (regressão upstream, mudança da Proton, etc.) fica visível em segundos em vez de horas/dias. Tradeoff: `notify-send` exige sessão gráfica ativa; em headless precisaria canal alternativo (registrar como follow-up se virar caso real).
+
+- bisync: investigar erro recorrente `chtimes /storage/3. Resources/Projects/drive-sync: read-only file system` — 3.418 ocorrências desde 27/abr 2026, exclusivo dessa subpasta, causa loop de `--resync` que agrava o disparo da race do auth. Reprodução manual fora do daemon (touch, lsattr, btrfs subvolume show, getfacl) não evidencia read-only — fenômeno episódico. Hipóteses a investigar: SELinux denial específico do contexto do serviço (interação com `NoNewPrivileges`/`ProtectSystem=strict` da unit + path com espaços/ponto/número), bug do rclone com chtimes em paths não-ASCII, ou outro processo segurando lock. Item começa em /debug, não /triage — só sabemos o tamanho do fix após isolar.
+
+## Concluídos
