@@ -28,7 +28,7 @@ python -m drive_sync -c path/to/config.yaml  # use alternate config
 
 Logs go to `~/.local/state/drive-sync/drive-sync.log` by default. Set `logging.level: DEBUG` in config.yaml for verbose output.
 
-There is currently no test suite.
+test_command: `python -m pytest tests/ -v`
 
 ## Architecture
 

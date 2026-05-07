@@ -1,4 +1,6 @@
 """Tests for sync_engine — remote URI building and bisync behaviour."""
+import asyncio
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +15,7 @@ from drive_sync.config import (
     RcloneConfig,
     WatcherConfig,
 )
-from drive_sync.sync_engine import RcloneEngine, _state_marker_for, remote_uri_for
+from drive_sync.sync_engine import RcloneEngine, _run, _state_marker_for, remote_uri_for
 
 
 # ---------------------------------------------------------------------------
@@ -267,3 +269,62 @@ async def test_mkdir_uses_correct_remote(tmp_path, monkeypatch):
 
     mkdir_cmd = _mkdir_calls(captured)[0]
     assert "proton:Sync/dev/projects" in mkdir_cmd
+
+
+# ---------------------------------------------------------------------------
+# _run — serialização de chamadas concorrentes (ADR-001, rclone#7381)
+# ---------------------------------------------------------------------------
+
+async def test_run_serializes_concurrent_calls(monkeypatch):
+    """Duas chamadas concorrentes a _run não se sobrepõem temporalmente."""
+    intervals: list[tuple[float, float]] = []
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            start = time.perf_counter()
+            await asyncio.sleep(0.05)
+            end = time.perf_counter()
+            intervals.append((start, end))
+            return (b"", b"")
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    await asyncio.gather(_run(["rclone", "one"]), _run(["rclone", "two"]))
+
+    assert len(intervals) == 2
+    (start1, end1), (start2, end2) = sorted(intervals)
+    assert start2 >= end1 - 0.010, (
+        f"Chamadas concorrentes se sobrepõem: "
+        f"call1=({start1:.4f},{end1:.4f}), call2=({start2:.4f},{end2:.4f})"
+    )
+
+
+async def test_run_releases_lock_on_subprocess_exception(monkeypatch):
+    """Exceção dentro do `async with` libera o lock — chamada seguinte não trava."""
+    call_count = {"n": 0}
+
+    async def fake_subprocess_exec(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError("rclone binary missing")
+
+        class _FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"", b"")
+
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+
+    with pytest.raises(OSError):
+        await _run(["rclone", "first"])
+
+    rc, _out, _err = await asyncio.wait_for(_run(["rclone", "second"]), timeout=1.0)
+    assert rc == 0
