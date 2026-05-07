@@ -16,9 +16,9 @@ RestartSec=15
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-# Hardening básico — não precisa de root nem de namespace especial.
+# Hardening básico. ProtectSystem=strict removido — incompatível com rclone
+# bisync sob backend protondrive (ADR-002).
 NoNewPrivileges=yes
-ProtectSystem=strict
 PrivateTmp=yes
 
 [Install]
