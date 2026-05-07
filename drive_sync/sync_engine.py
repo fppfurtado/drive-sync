@@ -23,6 +23,11 @@ from .exclude_presets import default_excludes_for_code
 
 log = logging.getLogger(__name__)
 
+# Serializa subprocess rclone — race no token refresh do backend protondrive
+# zera os tokens cached quando ≥2 instâncias rclone init-ializam em paralelo
+# (rclone#7381, ADR-001). Pode ser removido se o backend migrar para lib/oauthutil.
+_rclone_lock = asyncio.Lock()
+
 
 def _bisync_state_dir() -> Path:
     """Diretório onde o rclone guarda o estado das bisync (XDG)."""
@@ -54,17 +59,18 @@ def remote_uri_for(folder: FolderConfig, app: AppConfig, sub: str | None = None)
 async def _run(cmd: list[str]) -> tuple[int, str, str]:
     """Roda processo de forma assíncrona e devolve (rc, stdout, stderr)."""
     log.debug("Executando: %s", " ".join(cmd))
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_b, stderr_b = await proc.communicate()
-    return (
-        proc.returncode or 0,
-        stdout_b.decode("utf-8", errors="replace"),
-        stderr_b.decode("utf-8", errors="replace"),
-    )
+    async with _rclone_lock:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await proc.communicate()
+        return (
+            proc.returncode or 0,
+            stdout_b.decode("utf-8", errors="replace"),
+            stderr_b.decode("utf-8", errors="replace"),
+        )
 
 
 class RcloneEngine:
