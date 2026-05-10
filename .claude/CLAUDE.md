@@ -23,6 +23,7 @@ For dev, use an **isolated venv** — do NOT `pip install -e .` against system P
 ```bash
 python -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python -m drive_sync --check    # validate config
+.venv/bin/python -m drive_sync --status   # snapshot do estado das pastas
 .venv/bin/python -m drive_sync --once     # one sync pass, exit
 .venv/bin/python -m drive_sync            # run as daemon
 ```
