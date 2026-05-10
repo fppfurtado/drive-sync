@@ -18,13 +18,16 @@ journalctl --user -u drive-sync -f
 
 ## Development Workflow
 
+For dev, use an **isolated venv** — do NOT `pip install -e .` against system Python. On Fedora that overwrites the pipx-managed symlink at `~/.local/bin/drive-sync` and breaks the systemd unit (see "install: investigar regressão do symlink" in [BACKLOG.md](../BACKLOG.md)).
+
 ```bash
-pip install -e .                 # editable install (alternative to pipx for dev)
-python -m drive_sync --check     # validate config without starting daemon
-python -m drive_sync --once      # run one sync pass and exit (useful for testing)
-python -m drive_sync             # run as daemon (Ctrl+C to stop)
-python -m drive_sync -c path/to/config.yaml  # use alternate config
+python -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/python -m drive_sync --check    # validate config
+.venv/bin/python -m drive_sync --once     # one sync pass, exit
+.venv/bin/python -m drive_sync            # run as daemon
 ```
+
+Production install health check: `pipx list` should show `drive-sync` without the "symlink missing or pointing to unexpected location" warning.
 
 Logs go to `~/.local/state/drive-sync/drive-sync.log` by default. Set `logging.level: DEBUG` in config.yaml for verbose output.
 
@@ -45,6 +48,15 @@ The daemon has four cooperating layers:
 **`git_handler.py`** — Used only when `git_mode: bundle`. Creates a git bundle that also captures uncommitted worktree state: it creates a snapshot commit in `refs/drive-sync/snapshot` using a temporary `GIT_INDEX_FILE` (so the user's index is never touched), bundles it alongside the full history, then deletes the snapshot ref. `restore_from_bundle()` reverses this, materializing worktree files using `git checkout-index` against a temporary index.
 
 **`exclude_presets.py`** — Returns the list of rclone `--exclude` globs applied when `auto_exclude: true`. Covers Python, JS/TS, Rust, Go, Java, editor artifacts. Note: `.git/` itself is NOT excluded in `bisync` mode (the full repo needs to be cloud-usable), only transient git files inside `.git/`.
+
+## Operational Invariants
+
+Non-obvious behaviors that have caused multi-day incidents — preserve them:
+
+- **rclone calls are serialized** ([ADR-001](../docs/decisions/ADR-001-serializar-chamadas-rclone.md)): an `asyncio.Lock` wraps `_run` in `sync_engine.py`. Worker parallelism is an illusion — all useful work is rclone, which runs one at a time. Avoids a token-refresh race in the protondrive backend ([rclone#7381](https://github.com/rclone/rclone/issues/7381)) that otherwise invalidates `client_uid` every ~5 days and forces manual TOTP reauth.
+- **bisync errors do NOT auto-recover**: `sync_engine.py:134-137` is an explicit decision — when rclone reports "Must run --resync to recover", the daemon logs and moves on. Manual `rclone bisync ... --resync` is required (mirror the daemon's flags from journalctl).
+- **Error logs are tail-truncated**: `sync_engine.py:133` records `err.strip()[-500:]`. Cryptic fragments like `"xist?"` are tail-only — real cause is earlier in stderr. Read full log lines, or capture stderr separately when reproducing.
+- **systemd unit hardening was relaxed** ([ADR-002](../docs/decisions/ADR-002-relaxar-hardening-systemd-protondrive.md)): `ProtectSystem=strict` was removed because it triggered spurious EROFS in rclone+protondrive on large folders. Don't re-add without re-running the ADR's experiment.
 
 ## git_mode Semantics
 
@@ -69,3 +81,9 @@ The reference config at [config/config.yaml](config/config.yaml) shows the full 
 - bisync state markers: `~/.cache/rclone/bisync/`
 - Git bundles (bundle mode): `~/.cache/drive-sync/bundles/<task>/<rel>.gitbundle`
 - systemd unit: `~/.config/systemd/user/drive-sync.service`
+
+## Decision Log & Backlog
+
+- ADRs: `docs/decisions/ADR-*.md` — durable architectural decisions.
+- Plans: `docs/plans/*.md` — pre-fact implementation plans, kept after merge.
+- Backlog: `BACKLOG.md` — `## Próximos` and `## Concluídos` (kept as institutional memory; do not prune).
