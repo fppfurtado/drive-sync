@@ -12,6 +12,8 @@
 
 ## Concluídos
 
+- CLI `drive-sync --status` para visibilidade observacional do daemon — snapshot one-shot lendo markers do bisync (`~/.cache/rclone/bisync/`) e `config.yaml` para mostrar pastas configuradas, última sincronização por pasta e estado de inicialização. TUI live, controle (forçar sync/pausar pasta) e expor estado in-memory via IPC ficam como follow-ups separados.
+
 - unit systemd: relaxar hardening removendo `ProtectSystem=strict` para destravar bisync sob protondrive — diagnóstico do /debug 07/mai 2026 (após 9+ dias de loop EROFS no `dev-projects` bloqueando 15549+ arquivos de `h3/gestaoclick-report_react/.git/objects`) isolou a unit systemd como variável discriminante: rclone bisync com flags idênticas executou 2h58min manualmente sem EROFS, e falhou em ~33min sob a unit. Trade-off (defesa em profundidade reduzida vs. funcionalidade) registrado em ADR-002.
 
 - bisync: investigação do EROFS espúrio em pastas grandes (`chtimes`/`mkdir`/`.partial: read-only file system`) — diagnóstico fechado em /debug 07/mai 2026: causa = unit systemd interferindo com rclone+protondrive backend. Experimento controlado isolou a unit como variável discriminante (rclone bisync com flags idênticas executou 2h58min manualmente sem EROFS; ~33min até falhar sob a unit). Hipóteses falsificadas no caminho: corrupção do FS (btrfs sadio), race entre instâncias rclone do daemon (lock ADR-001 já em produção), concorrência interna do rclone (`--transfers=1 --checkers=1` reproduziu igual). Trade-off (relaxar hardening vs. funcionalidade) e plano de fix em [ADR-002](docs/decisions/ADR-002-relaxar-hardening-systemd-protondrive.md) e [docs/plans/relax-systemd-hardening.md](docs/plans/relax-systemd-hardening.md).
