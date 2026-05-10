@@ -66,6 +66,20 @@ systemctl --user start drive-sync
 journalctl --user -u drive-sync -f
 ```
 
+Para uma visão agregada do estado das pastas (sem precisar abrir o
+journal), use `drive-sync --status` — snapshot one-shot com a última
+sincronização e estado de inicialização por pasta:
+
+```text
+$ drive-sync --status
+# drive-sync status v1 — formato textual não-estável, use --json quando disponível
+
+Folder                          Initialized  Last sync         Remote
+------------------------------  -----------  ----------------  ------------------------
+/storage/3. Resources/Projects  yes          2026-05-10 06:48  proton:Sync/dev/projects
+~/Videos                        yes          2026-05-09 11:42  proton:Sync/videos
+```
+
 ---
 
 ## Gerenciar pastas via CLI
