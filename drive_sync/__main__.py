@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import default_config_path, load_config
 from .daemon import SyncDaemon
 from .logging_setup import setup_logging
+from .status import render_status
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -22,15 +23,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Caminho do config.yaml (padrão: {default_config_path()})",
     )
-    p.add_argument(
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="Apenas valida o arquivo de configuração e sai.",
     )
-    p.add_argument(
+    mode.add_argument(
         "--once",
         action="store_true",
         help="Roda uma única passada de sincronização e encerra (não fica como daemon).",
+    )
+    mode.add_argument(
+        "--status",
+        action="store_true",
+        help="Imprime snapshot do estado das pastas (último sync, inicialização) e sai.",
     )
     return p
 
@@ -50,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         print(f"erro: {exc}", file=sys.stderr)
         return 2
+
+    if args.status:
+        print(render_status(cfg))
+        return 0
 
     log = setup_logging(cfg.logging)
     log.info("drive-sync iniciando — config: %s", cfg.source_path)
