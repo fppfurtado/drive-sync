@@ -42,6 +42,8 @@ def _sanitize_for_lst(s: str) -> str:
 def _last_sync_mtime(local: Path, remote: str, bisync_dir: Path) -> float | None:
     if not bisync_dir.exists():
         return None
+    # Casamos só `.lst` (não `.lst-new`/`.lst-err`): `.lst` é o listing final
+    # persistido após bisync OK; `.lst-new` é transitório durante run em curso.
     prefix = f"{_sanitize_for_lst(str(local))}..{_sanitize_for_lst(remote)}.path"
     mtimes = [
         f.stat().st_mtime
