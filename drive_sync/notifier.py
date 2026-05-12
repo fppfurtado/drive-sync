@@ -1,36 +1,49 @@
 """Sinalização para o operador quando o daemon transita de/para estados notáveis.
 
-Roda via subprocess (`systemd-notify`, `notify-send`) em vez de adicionar libs PyPI —
-ambos os binários estão na base do Fedora. Cada canal é best-effort e isolado:
-falha em um (ex.: sessão headless sem DISPLAY) não afeta os outros nem o daemon.
+`notify-send` roda via subprocess (binário base do Fedora). `sd_notify` escreve
+direto no `NOTIFY_SOCKET` via socket Unix stdlib — sob `NotifyAccess=main`
+(ADR-003), o sender precisa ser o MainPID do daemon; um subprocess child seria
+rejeitado silenciosamente pelo systemd. Sem libs PyPI: o protocolo é literal
+(`READY=1\\n`, `STATUS=<msg>\\n`). Cada canal é best-effort e isolado: falha em
+um (ex.: sessão headless sem DISPLAY) não afeta os outros nem o daemon.
 """
 from __future__ import annotations
 
 import logging
 import os
+import socket
 import subprocess
 
 log = logging.getLogger(__name__)
+
+_SOCKET_TIMEOUT_SECONDS = 1.0
 
 
 class Notifier:
     def degraded(self, reason: str) -> None:
         """Dispara os três canais — log estruturado + sd_notify + notify-send."""
         log.critical("[AUTH_DEGRADED] %s", reason)
-        self._systemd_notify([f"--status=degraded: {reason}"])
+        self._systemd_notify(f"STATUS=degraded: {reason}")
         self._notify_send("drive-sync degraded", reason)
 
     def ready(self) -> None:
         """Emite READY=1 ao systemd — exigido sob Type=notify (ADR-003)."""
-        self._systemd_notify(["--ready"])
+        self._systemd_notify("READY=1")
 
-    def _systemd_notify(self, args: list[str]) -> None:
-        if not os.environ.get("NOTIFY_SOCKET"):
+    def _systemd_notify(self, payload: str) -> None:
+        addr = os.environ.get("NOTIFY_SOCKET")
+        if not addr:
             return
+        # Prefixo '@' em NOTIFY_SOCKET indica abstract namespace no Linux:
+        # converter para NUL byte antes do sendto.
+        if addr.startswith("@"):
+            addr = "\0" + addr[1:]
         try:
-            subprocess.run(["systemd-notify", *args], check=False, timeout=5)
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.debug("systemd-notify %s falhou: %s", args, exc)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(_SOCKET_TIMEOUT_SECONDS)
+                sock.sendto(payload.encode("utf-8") + b"\n", addr)
+        except OSError as exc:
+            log.debug("sd_notify %r falhou: %s", payload, exc)
 
     def _notify_send(self, summary: str, body: str) -> None:
         if not os.environ.get("DISPLAY") and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
