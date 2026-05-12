@@ -18,7 +18,8 @@ from pathlib import Path
 
 from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
-from .sync_engine import RcloneEngine, remote_uri_for
+from .notifier import Notifier
+from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
 from .watcher import FilesystemWatcher
 
 log = logging.getLogger(__name__)
@@ -30,12 +31,28 @@ class SyncDaemon:
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cfg.watcher.queue_size)
         self.engine = RcloneEngine(cfg)
         self.git = GitHandler(cfg.git)
+        self._notifier = Notifier()
         self._semaphore = asyncio.Semaphore(cfg.watcher.max_concurrent_jobs)
         self._stop_event = asyncio.Event()
         self._inflight: set[str] = set()  # tarefas com job já rodando — evita duplicação
         self._inflight_lock = asyncio.Lock()
+        # Pause-on-failure de auth: workers drenam fila enquanto setado.
+        self._degraded = asyncio.Event()
+        self._degraded_reason: str | None = None
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
+
+    def _enter_degraded(self, reason: str) -> None:
+        """Transiciona para estado degraded — idempotente.
+
+        Atômico entre tasks por ser síncrono (sem await entre is_set e set).
+        Inserir await aqui exige asyncio.Lock para preservar o invariante.
+        """
+        if self._degraded.is_set():
+            return
+        self._degraded_reason = reason
+        self._degraded.set()
+        self._notifier.degraded(reason)
 
     # ------------------------------------------------------------------
     # Roteamento de uma tarefa: três modos possíveis.
@@ -139,6 +156,10 @@ class SyncDaemon:
             except asyncio.TimeoutError:
                 continue
 
+            if self._degraded.is_set():
+                self.queue.task_done()
+                continue
+
             folder = next((f for f in self.cfg.folders if f.name == folder_name), None)
             if folder is None or not folder.enabled:
                 self.queue.task_done()
@@ -155,6 +176,8 @@ class SyncDaemon:
             try:
                 async with self._semaphore:
                     await self._process_folder(folder)
+            except AuthDegradedError as exc:
+                self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
             except Exception as exc:  # noqa: BLE001
                 log.exception("[%s] Erro inesperado: %s", folder.name, exc)
             finally:
@@ -172,10 +195,33 @@ class SyncDaemon:
                 return  # stop solicitado
             except asyncio.TimeoutError:
                 pass
+            if self._degraded.is_set():
+                continue
             log.info("Sincronização periódica de rede de segurança disparada.")
             for f in self.cfg.folders:
                 if f.enabled:
                     await self.queue.put(f.name)
+
+    async def _auth_probe_loop(self) -> None:
+        if not self.cfg.health_check.enabled:
+            return
+        interval = self.cfg.health_check.interval_seconds
+        if interval <= 0:
+            return
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return  # stop solicitado
+            except asyncio.TimeoutError:
+                pass
+            # Skip enquanto degraded: backend sabidamente quebrado não traz
+            # informação nova e gasta rate-limit (pode aprofundar CAPTCHA gate).
+            if self._degraded.is_set():
+                continue
+            try:
+                await self.engine.auth_probe()
+            except AuthDegradedError as exc:
+                self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -205,6 +251,10 @@ class SyncDaemon:
             for i in range(self.cfg.watcher.max_concurrent_jobs)
         ]
         periodic = asyncio.create_task(self._periodic_full_sync())
+        probe = asyncio.create_task(self._auth_probe_loop())
+
+        # Última linha antes do bloqueio: mover invalida o gatilho de revisão da ADR-003.
+        self._notifier.ready()
 
         await self._stop_event.wait()
         log.info("Shutdown solicitado — parando watcher e workers.")
@@ -214,5 +264,6 @@ class SyncDaemon:
         for w in workers:
             w.cancel()
         periodic.cancel()
-        await asyncio.gather(*workers, periodic, return_exceptions=True)
+        probe.cancel()
+        await asyncio.gather(*workers, periodic, probe, return_exceptions=True)
         log.info("Daemon finalizado.")

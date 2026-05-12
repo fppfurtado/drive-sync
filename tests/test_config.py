@@ -204,3 +204,45 @@ def test_default_config_path_fallback(monkeypatch):
     assert path.name == "config.yaml"
     assert "drive-sync" in str(path)
     assert ".config" in str(path)
+
+
+# ---------------------------------------------------------------------------
+# health_check — defaults e parsing
+# ---------------------------------------------------------------------------
+
+def test_health_check_defaults_when_section_absent(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+    """)
+    app = load_config(cfg)
+    assert app.health_check.enabled is True
+    assert app.health_check.interval_seconds == 3600
+
+
+def test_health_check_disabled(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+        health_check:
+          enabled: false
+    """)
+    app = load_config(cfg)
+    assert app.health_check.enabled is False
+
+
+def test_health_check_custom_interval(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+        health_check:
+          interval_seconds: 60
+    """)
+    app = load_config(cfg)
+    assert app.health_check.interval_seconds == 60

@@ -68,6 +68,12 @@ class DedupeConfig:
 
 
 @dataclass
+class HealthCheckConfig:
+    enabled: bool = True
+    interval_seconds: int = 3600
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     file: Path = field(default_factory=lambda: _expand("~/.local/state/drive-sync/drive-sync.log"))
@@ -83,6 +89,7 @@ class AppConfig:
     git: GitConfig
     watcher: WatcherConfig
     dedupe: DedupeConfig
+    health_check: HealthCheckConfig
     logging: LoggingConfig
     source_path: Path  # de onde o arquivo foi carregado (debug)
 
@@ -176,6 +183,12 @@ def load_config(path: Path | None = None) -> AppConfig:
         ),
     )
 
+    h_raw = raw.get("health_check", {}) or {}
+    health_check = HealthCheckConfig(
+        enabled=bool(h_raw.get("enabled", True)),
+        interval_seconds=int(h_raw.get("interval_seconds", 3600)),
+    )
+
     l_raw = raw.get("logging", {}) or {}
     logging_cfg = LoggingConfig(
         level=str(l_raw.get("level", "INFO")).upper(),
@@ -191,6 +204,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         git=git,
         watcher=watcher,
         dedupe=dedupe,
+        health_check=health_check,
         logging=logging_cfg,
         source_path=cfg_path,
     )

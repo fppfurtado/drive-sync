@@ -137,6 +137,14 @@ watcher:
 dedupe:
   skip_subpaths_of_configured_folders: true
 
+# Probe periódico do backend para detectar falha de auth antes que um job real
+# falhe (Code=8002/9001 do protondrive). Em sessão saudável, gera 1 chamada
+# `rclone about` por intervalo. Desative em máquinas que não devem fazer
+# chamada periódica ao backend (offline, CI).
+health_check:
+  enabled: true
+  interval_seconds: 3600
+
 logging:
   level: "INFO"
   file: "~/.local/state/drive-sync/drive-sync.log"
