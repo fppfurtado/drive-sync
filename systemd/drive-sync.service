@@ -7,7 +7,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify + NotifyAccess=main exigidos para sd_notify STATUS=/READY=1 (ADR-003).
+Type=notify
+NotifyAccess=main
 ExecStart=%h/.local/bin/drive-sync
 # Reinício automático em falha — backoff progressivo evita loop quente.
 Restart=on-failure

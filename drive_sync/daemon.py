@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
+from .notifier import Notifier
 from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
 from .watcher import FilesystemWatcher
 
@@ -30,6 +31,7 @@ class SyncDaemon:
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cfg.watcher.queue_size)
         self.engine = RcloneEngine(cfg)
         self.git = GitHandler(cfg.git)
+        self._notifier = Notifier()
         self._semaphore = asyncio.Semaphore(cfg.watcher.max_concurrent_jobs)
         self._stop_event = asyncio.Event()
         self._inflight: set[str] = set()  # tarefas com job já rodando — evita duplicação
@@ -50,7 +52,7 @@ class SyncDaemon:
             return
         self._degraded_reason = reason
         self._degraded.set()
-        log.critical("[AUTH_DEGRADED] %s", reason)
+        self._notifier.degraded(reason)
 
     # ------------------------------------------------------------------
     # Roteamento de uma tarefa: três modos possíveis.
@@ -228,6 +230,9 @@ class SyncDaemon:
             for i in range(self.cfg.watcher.max_concurrent_jobs)
         ]
         periodic = asyncio.create_task(self._periodic_full_sync())
+
+        # Última linha antes do bloqueio: mover invalida o gatilho de revisão da ADR-003.
+        self._notifier.ready()
 
         await self._stop_event.wait()
         log.info("Shutdown solicitado — parando watcher e workers.")
