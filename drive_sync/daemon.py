@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
-from .sync_engine import RcloneEngine, remote_uri_for
+from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
 from .watcher import FilesystemWatcher
 
 log = logging.getLogger(__name__)
@@ -34,8 +34,23 @@ class SyncDaemon:
         self._stop_event = asyncio.Event()
         self._inflight: set[str] = set()  # tarefas com job já rodando — evita duplicação
         self._inflight_lock = asyncio.Lock()
+        # Pause-on-failure de auth: workers drenam fila enquanto setado.
+        self._degraded = asyncio.Event()
+        self._degraded_reason: str | None = None
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
+
+    def _enter_degraded(self, reason: str) -> None:
+        """Transiciona para estado degraded — idempotente.
+
+        Atômico entre tasks por ser síncrono (sem await entre is_set e set).
+        Inserir await aqui exige asyncio.Lock para preservar o invariante.
+        """
+        if self._degraded.is_set():
+            return
+        self._degraded_reason = reason
+        self._degraded.set()
+        log.critical("[AUTH_DEGRADED] %s", reason)
 
     # ------------------------------------------------------------------
     # Roteamento de uma tarefa: três modos possíveis.
@@ -139,6 +154,10 @@ class SyncDaemon:
             except asyncio.TimeoutError:
                 continue
 
+            if self._degraded.is_set():
+                self.queue.task_done()
+                continue
+
             folder = next((f for f in self.cfg.folders if f.name == folder_name), None)
             if folder is None or not folder.enabled:
                 self.queue.task_done()
@@ -155,6 +174,8 @@ class SyncDaemon:
             try:
                 async with self._semaphore:
                     await self._process_folder(folder)
+            except AuthDegradedError as exc:
+                self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
             except Exception as exc:  # noqa: BLE001
                 log.exception("[%s] Erro inesperado: %s", folder.name, exc)
             finally:
@@ -172,6 +193,8 @@ class SyncDaemon:
                 return  # stop solicitado
             except asyncio.TimeoutError:
                 pass
+            if self._degraded.is_set():
+                continue
             log.info("Sincronização periódica de rede de segurança disparada.")
             for f in self.cfg.folders:
                 if f.enabled:
