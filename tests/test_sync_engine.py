@@ -16,7 +16,14 @@ from drive_sync.config import (
     RcloneConfig,
     WatcherConfig,
 )
-from drive_sync.sync_engine import RcloneEngine, _run, _state_marker_for, remote_uri_for
+from drive_sync.sync_engine import (
+    AuthDegradedError,
+    RcloneEngine,
+    _classify_rclone_stderr,
+    _run,
+    _state_marker_for,
+    remote_uri_for,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -330,3 +337,142 @@ async def test_run_releases_lock_on_subprocess_exception(monkeypatch):
 
     rc, _out, _err = await asyncio.wait_for(_run(["rclone", "second"]), timeout=1.0)
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# _classify_rclone_stderr — detecção de falha de auth conhecida
+# ---------------------------------------------------------------------------
+
+# Amostras reais do journal de 2026-05-11 — preservar literais.
+_STDERR_8002 = (
+    'CRITICAL: Failed to create file system for "proton:Sync/dev/projects": '
+    "couldn't initialize a new proton drive instance: 422 POST "
+    "https://mail.proton.me/api/auth/v4/2fa: Incorrect login credentials. "
+    "Please try again. (Code=8002, Status=422)"
+)
+_STDERR_9001 = (
+    'CRITICAL: Failed to create file system for "proton:Sync/library": '
+    "couldn't initialize a new proton drive instance: 422 POST "
+    "https://mail.proton.me/api/auth/v4: For security reasons, please complete "
+    "CAPTCHA. (Code=9001, Status=422)"
+)
+
+
+def test_classify_invalid_credentials_8002():
+    err = _classify_rclone_stderr(_STDERR_8002)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
+    assert err.code == 8002
+    assert "Code=8002" in err.stderr_tail
+
+
+def test_classify_captcha_required_9001():
+    err = _classify_rclone_stderr(_STDERR_9001)
+    assert err is not None
+    assert err.kind == "captcha_required"
+    assert err.code == 9001
+
+
+def test_classify_returns_none_for_non_auth_error():
+    assert _classify_rclone_stderr("rclone: directory not found") is None
+
+
+def test_classify_returns_none_for_other_status_code():
+    # Code=10013 / Status=400 no /refresh — não é dos códigos alvo.
+    stderr = (
+        "POST https://mail.proton.me/api/auth/v4/refresh: Invalid refresh token "
+        "(Code=10013, Status=400)"
+    )
+    assert _classify_rclone_stderr(stderr) is None
+
+
+def test_classify_returns_none_without_full_anchor():
+    # Substring "Code=8002" sem o "(...Status=422)" completo — não casa.
+    assert _classify_rclone_stderr("logged Code=8002 somewhere /api/auth/v4") is None
+
+
+def test_classify_returns_none_without_auth_endpoint():
+    # Códigos batem mas o endpoint não é /api/auth/v4 — descarta.
+    stderr = "POST https://api.proton.me/drive/v2/foo (Code=8002, Status=422)"
+    assert _classify_rclone_stderr(stderr) is None
+
+
+# ---------------------------------------------------------------------------
+# _run levanta AuthDegradedError quando stderr matcha
+# ---------------------------------------------------------------------------
+
+async def test_run_raises_auth_degraded_on_matching_stderr(monkeypatch):
+    class _FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", _STDERR_8002.encode("utf-8"))
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(AuthDegradedError) as excinfo:
+        await _run(["rclone", "mkdir", "proton:Sync/dev/projects"])
+
+    assert excinfo.value.code == 8002
+
+
+async def test_run_does_not_raise_on_non_auth_failure(monkeypatch):
+    class _FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", b"rclone: directory not found")
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    rc, _out, err = await _run(["rclone", "lsd", "proton:nonexistent"])
+    assert rc == 1
+    assert "not found" in err
+
+
+# ---------------------------------------------------------------------------
+# AuthDegradedError propaga via _ensure_remote_dir e bisync_folder
+# ---------------------------------------------------------------------------
+
+async def test_bisync_folder_propagates_auth_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    engine = RcloneEngine(_app())
+    folder = _folder(local_path=tmp_path / "local")
+
+    async def fake_run(cmd):
+        raise AuthDegradedError(kind="invalid_credentials", code=8002, stderr_tail="...")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        with pytest.raises(AuthDegradedError):
+            await engine.bisync_folder(folder)
+
+
+# ---------------------------------------------------------------------------
+# auth_probe — propaga AuthDegradedError, silencia outros erros
+# ---------------------------------------------------------------------------
+
+async def test_auth_probe_propagates_auth_error():
+    engine = RcloneEngine(_app())
+
+    async def fake_run(cmd):
+        raise AuthDegradedError(kind="captcha_required", code=9001, stderr_tail="...")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        with pytest.raises(AuthDegradedError):
+            await engine.auth_probe()
+
+
+async def test_auth_probe_silences_non_auth_error():
+    engine = RcloneEngine(_app())
+
+    async def fake_run(cmd):
+        raise OSError("network unreachable")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        await engine.auth_probe()  # não deve levantar
