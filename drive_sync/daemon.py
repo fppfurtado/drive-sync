@@ -202,6 +202,27 @@ class SyncDaemon:
                 if f.enabled:
                     await self.queue.put(f.name)
 
+    async def _auth_probe_loop(self) -> None:
+        if not self.cfg.health_check.enabled:
+            return
+        interval = self.cfg.health_check.interval_seconds
+        if interval <= 0:
+            return
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return  # stop solicitado
+            except asyncio.TimeoutError:
+                pass
+            # Skip enquanto degraded: backend sabidamente quebrado não traz
+            # informação nova e gasta rate-limit (pode aprofundar CAPTCHA gate).
+            if self._degraded.is_set():
+                continue
+            try:
+                await self.engine.auth_probe()
+            except AuthDegradedError as exc:
+                self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -230,6 +251,7 @@ class SyncDaemon:
             for i in range(self.cfg.watcher.max_concurrent_jobs)
         ]
         periodic = asyncio.create_task(self._periodic_full_sync())
+        probe = asyncio.create_task(self._auth_probe_loop())
 
         # Última linha antes do bloqueio: mover invalida o gatilho de revisão da ADR-003.
         self._notifier.ready()
@@ -242,5 +264,6 @@ class SyncDaemon:
         for w in workers:
             w.cancel()
         periodic.cancel()
-        await asyncio.gather(*workers, periodic, return_exceptions=True)
+        probe.cancel()
+        await asyncio.gather(*workers, periodic, probe, return_exceptions=True)
         log.info("Daemon finalizado.")

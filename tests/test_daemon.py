@@ -8,6 +8,7 @@ from drive_sync.config import (
     DedupeConfig,
     FolderConfig,
     GitConfig,
+    HealthCheckConfig,
     LoggingConfig,
     RcloneConfig,
     WatcherConfig,
@@ -26,6 +27,7 @@ def _make_config(folders: list[FolderConfig] | None = None) -> AppConfig:
         git=GitConfig(),
         watcher=WatcherConfig(max_concurrent_jobs=2, queue_size=20),
         dedupe=DedupeConfig(),
+        health_check=HealthCheckConfig(),
         logging=LoggingConfig(),
         source_path=Path("/fake/config.yaml"),
     )

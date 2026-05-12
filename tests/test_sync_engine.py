@@ -11,6 +11,7 @@ from drive_sync.config import (
     DedupeConfig,
     FolderConfig,
     GitConfig,
+    HealthCheckConfig,
     LoggingConfig,
     RcloneConfig,
     WatcherConfig,
@@ -29,6 +30,7 @@ def _app(remote_name: str = "proton", remote_root: str = "Sync") -> AppConfig:
         git=GitConfig(),
         watcher=WatcherConfig(),
         dedupe=DedupeConfig(),
+        health_check=HealthCheckConfig(),
         logging=LoggingConfig(),
         source_path=Path("/fake/config.yaml"),
     )

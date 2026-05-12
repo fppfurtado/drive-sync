@@ -119,6 +119,24 @@ class RcloneEngine:
     def _base_cmd(self) -> list[str]:
         return [self.app.rclone.binary, *self.app.rclone.global_flags]
 
+    async def auth_probe(self) -> None:
+        """Probe leve do backend para detectar falha de auth antes de um job real.
+
+        Levanta AuthDegradedError quando o backend reporta auth quebrada.
+        Outros erros (rede, rate-limit transitório) são silenciados — probe não
+        deve degradar o daemon por falha não-auth.
+        """
+        # `about` exercita o endpoint /api/auth/v4 sem listar conteúdo (payload
+        # mínimo) — força exatamente o caminho que falha com Code=8002/9001.
+        remote = f"{self.app.rclone.remote_name}:"
+        cmd = self._base_cmd() + ["about", remote]
+        try:
+            await _run(cmd)
+        except AuthDegradedError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("auth_probe falhou (não-auth): %s", exc)
+
     # -----------------------------------------------------------------
     # Sincronização bidirecional de uma pasta "comum" (não-Git)
     # -----------------------------------------------------------------
