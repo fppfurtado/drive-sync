@@ -16,6 +16,8 @@
 
 ## Concluídos
 
+- notifier: substituir subprocess `systemd-notify` por escrita direta em `NOTIFY_SOCKET` — sob `NotifyAccess=main` o PID do child do subprocess é rejeitado, travando `systemctl start` em timeout (READY=1 perdido) e silenciando `STATUS=degraded:` quando auth-pause dispara. Diagnóstico em /debug 2026-05-12 (toggle empírico `NotifyAccess=all` confirmou); fix em [docs/plans/notifier-direct-socket.md](docs/plans/notifier-direct-socket.md) — socket Unix DGRAM stdlib, sender = MainPID, sem nova dependência PyPI. ADR-003 preservada.
+
 - daemon: health-check de auth + pause-on-failure — detectar `Code=8002`/422 em qualquer job, marcar daemon como degraded (`sd_notify` ou similar), pausar workers e disparar `notify-send`. Hoje, falha de auth produz 26 erros/10min antes de qualquer sinalização (descobri por acaso 5 dias depois). Defesa em profundidade que vale mesmo com a serialização aplicada — qualquer erro de auth futuro (regressão upstream, mudança da Proton, etc.) fica visível em segundos em vez de horas/dias. Tradeoff: `notify-send` exige sessão gráfica ativa; em headless precisaria canal alternativo (registrar como follow-up se virar caso real).
 
 - CLI `drive-sync --status` para visibilidade observacional do daemon — snapshot one-shot lendo markers do bisync (`~/.cache/rclone/bisync/`) e `config.yaml` para mostrar pastas configuradas, última sincronização por pasta e estado de inicialização. TUI live, controle (forçar sync/pausar pasta) e expor estado in-memory via IPC ficam como follow-ups separados.
