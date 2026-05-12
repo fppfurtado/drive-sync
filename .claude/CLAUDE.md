@@ -58,6 +58,7 @@ Non-obvious behaviors that have caused multi-day incidents — preserve them:
 - **bisync errors do NOT auto-recover**: `sync_engine.py:134-137` is an explicit decision — when rclone reports "Must run --resync to recover", the daemon logs and moves on. Manual `rclone bisync ... --resync` is required (mirror the daemon's flags from journalctl).
 - **Error logs are tail-truncated**: `sync_engine.py:133` records `err.strip()[-500:]`. Cryptic fragments like `"xist?"` are tail-only — real cause is earlier in stderr. Read full log lines, or capture stderr separately when reproducing.
 - **systemd unit hardening was relaxed** ([ADR-002](../docs/decisions/ADR-002-relaxar-hardening-systemd-protondrive.md)): `ProtectSystem=strict` was removed because it triggered spurious EROFS in rclone+protondrive on large folders. Don't re-add without re-running the ADR's experiment.
+- **Daemon degraded em falha de auth (complementa, não substitui, o invariante `bisync errors do NOT auto-recover`)** ([ADR-003](../docs/decisions/ADR-003-type-notify-sinalizacao-degraded.md)): erros bisync genéricos continuam logando e seguindo; apenas falha de auth identificada (`Code=8002`/`Code=9001` no endpoint `/api/auth/v4`) dispara pausa global dos workers e sinalização via `systemctl status` (`STATUS=degraded: ...`), `notify-send` e log tagueado `[AUTH_DEGRADED]`. Recuperação manual: `rclone config update proton 2fa <code>` + `systemctl --user restart drive-sync`. Sem auto-resume — flakiness lateral da Proton pode mascarar problemas residuais.
 
 ## git_mode Semantics
 
