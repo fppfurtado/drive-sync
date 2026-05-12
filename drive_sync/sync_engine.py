@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 
 from .config import AppConfig, FolderConfig
@@ -27,6 +28,37 @@ log = logging.getLogger(__name__)
 # zera os tokens cached quando ≥2 instâncias rclone init-ializam em paralelo
 # (rclone#7381, ADR-001). Pode ser removido se o backend migrar para lib/oauthutil.
 _rclone_lock = asyncio.Lock()
+
+# Casa apenas a combinação `(Code=N, Status=422)` para evitar substring espúrio
+# em mensagens que mencionam só "Code=8002" sem contexto.
+_AUTH_CODE_RE = re.compile(r"\(Code=(8002|9001),\s*Status=422\)")
+_AUTH_ENDPOINT = "/api/auth/v4"
+
+
+class AuthDegradedError(RuntimeError):
+    """Levantada por `_run` quando o stderr do rclone indica falha de auth conhecida.
+
+    Carrega `kind` e `code` parseados para callers superiores sinalizarem
+    estado degraded sem re-parsear o stderr.
+    """
+
+    def __init__(self, kind: str, code: int, stderr_tail: str):
+        self.kind = kind
+        self.code = code
+        self.stderr_tail = stderr_tail
+        super().__init__(f"{kind} (Code={code})")
+
+
+def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
+    """Detecta falha de auth do backend protondrive no stderr do rclone (None se não casa)."""
+    if _AUTH_ENDPOINT not in stderr:
+        return None
+    match = _AUTH_CODE_RE.search(stderr)
+    if match is None:
+        return None
+    code = int(match.group(1))
+    kind = "invalid_credentials" if code == 8002 else "captcha_required"
+    return AuthDegradedError(kind=kind, code=code, stderr_tail=stderr.strip()[-500:])
 
 
 def _bisync_state_dir() -> Path:
@@ -57,7 +89,12 @@ def remote_uri_for(folder: FolderConfig, app: AppConfig, sub: str | None = None)
 
 
 async def _run(cmd: list[str]) -> tuple[int, str, str]:
-    """Roda processo de forma assíncrona e devolve (rc, stdout, stderr)."""
+    """Roda processo de forma assíncrona e devolve (rc, stdout, stderr).
+
+    Levanta `AuthDegradedError` quando o rclone retorna não-zero com stderr
+    casando padrão de falha de auth conhecida (Code=8002/9001). Demais erros
+    retornam normalmente — caller é quem decide o que fazer.
+    """
     log.debug("Executando: %s", " ".join(cmd))
     async with _rclone_lock:
         proc = await asyncio.create_subprocess_exec(
@@ -66,11 +103,13 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout_b, stderr_b = await proc.communicate()
-        return (
-            proc.returncode or 0,
-            stdout_b.decode("utf-8", errors="replace"),
-            stderr_b.decode("utf-8", errors="replace"),
-        )
+        rc = proc.returncode or 0
+        stderr = stderr_b.decode("utf-8", errors="replace")
+        if rc != 0:
+            auth_err = _classify_rclone_stderr(stderr)
+            if auth_err is not None:
+                raise auth_err
+        return rc, stdout_b.decode("utf-8", errors="replace"), stderr
 
 
 class RcloneEngine:
