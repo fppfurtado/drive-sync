@@ -39,6 +39,11 @@ class SyncDaemon:
         # Pause-on-failure de auth: workers drenam fila enquanto setado.
         self._degraded = asyncio.Event()
         self._degraded_reason: str | None = None
+        # Cooldown por folder (ADR-004): janela conta from-start; tasks diferidas
+        # re-enfileiram no fim da janela. Sem persistência cross-restart.
+        self._last_sync_at: dict[str, float] = {}
+        self._cooldown_scheduled: set[str] = set()
+        self._cooldown_tasks: set[asyncio.Task[None]] = set()
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
 
@@ -165,6 +170,11 @@ class SyncDaemon:
                 self.queue.task_done()
                 continue
 
+            if self._is_in_cooldown(folder):
+                self._maybe_schedule_deferred(folder)
+                self.queue.task_done()
+                continue
+
             # Evita duas execuções concorrentes da mesma tarefa.
             async with self._inflight_lock:
                 if folder.name in self._inflight:
@@ -172,6 +182,10 @@ class SyncDaemon:
                     self.queue.task_done()
                     continue
                 self._inflight.add(folder.name)
+
+            # Janela conta from-start (ADR-004).
+            if folder.cooldown_seconds > 0:
+                self._last_sync_at[folder.name] = asyncio.get_running_loop().time()
 
             try:
                 async with self._semaphore:
@@ -184,6 +198,31 @@ class SyncDaemon:
                 async with self._inflight_lock:
                     self._inflight.discard(folder.name)
                 self.queue.task_done()
+
+    def _is_in_cooldown(self, folder: FolderConfig) -> bool:
+        if folder.cooldown_seconds <= 0:
+            return False
+        last = self._last_sync_at.get(folder.name)
+        if last is None:
+            return False
+        return (asyncio.get_running_loop().time() - last) < folder.cooldown_seconds
+
+    def _maybe_schedule_deferred(self, folder: FolderConfig) -> None:
+        if folder.name in self._cooldown_scheduled:
+            log.debug("[%s] Cooldown já agendado — descartando evento.", folder.name)
+            return
+        last = self._last_sync_at[folder.name]
+        delay = (last + folder.cooldown_seconds) - asyncio.get_running_loop().time()
+        log.info("[%s] Cooldown ativo — sync diferida em %.0fs.", folder.name, delay)
+        self._cooldown_scheduled.add(folder.name)
+        task = asyncio.create_task(self._schedule_deferred_enqueue(folder.name, delay))
+        self._cooldown_tasks.add(task)
+        task.add_done_callback(self._cooldown_tasks.discard)
+
+    async def _schedule_deferred_enqueue(self, folder_name: str, delay: float) -> None:
+        await asyncio.sleep(delay)
+        self._cooldown_scheduled.discard(folder_name)
+        await self.queue.put(folder_name)
 
     async def _periodic_full_sync(self) -> None:
         interval = self.cfg.watcher.periodic_full_sync_seconds
@@ -265,5 +304,9 @@ class SyncDaemon:
             w.cancel()
         periodic.cancel()
         probe.cancel()
-        await asyncio.gather(*workers, periodic, probe, return_exceptions=True)
+        for task in list(self._cooldown_tasks):
+            task.cancel()
+        await asyncio.gather(
+            *workers, periodic, probe, *self._cooldown_tasks, return_exceptions=True
+        )
         log.info("Daemon finalizado.")
