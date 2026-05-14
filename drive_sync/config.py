@@ -35,6 +35,7 @@ class FolderConfig:
     # exclude_presets.default_excludes_for_code() em adição aos do usuário.
     auto_exclude: bool = True
     debounce_seconds: int = 5
+    cooldown_seconds: int = 0
 
 
 @dataclass
@@ -137,6 +138,13 @@ def load_config(path: Path | None = None) -> AppConfig:
                 f"(use 'off', 'bisync' ou 'bundle')"
             )
 
+        cooldown_seconds = int(entry.get("cooldown_seconds", 0))
+        if cooldown_seconds < 0:
+            raise ValueError(
+                f"cooldown_seconds inválido em {name!r}: {cooldown_seconds} "
+                f"(deve ser >= 0; use 0 para desligar)"
+            )
+
         folders.append(
             FolderConfig(
                 name=name,
@@ -147,6 +155,7 @@ def load_config(path: Path | None = None) -> AppConfig:
                 exclude=list(entry.get("exclude", [])),
                 auto_exclude=bool(entry.get("auto_exclude", True)),
                 debounce_seconds=int(entry.get("debounce_seconds", 5)),
+                cooldown_seconds=cooldown_seconds,
             )
         )
 

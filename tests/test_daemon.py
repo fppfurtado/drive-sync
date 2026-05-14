@@ -34,12 +34,15 @@ def _make_config(folders: list[FolderConfig] | None = None) -> AppConfig:
     )
 
 
-def _folder(name: str = "test", git_mode: str = "bisync") -> FolderConfig:
+def _folder(
+    name: str = "test", git_mode: str = "bisync", cooldown_seconds: int = 0
+) -> FolderConfig:
     return FolderConfig(
         name=name,
         local_path=Path(f"/tmp/{name}"),
         remote_subpath=name,
         git_mode=git_mode,
+        cooldown_seconds=cooldown_seconds,
     )
 
 
@@ -416,3 +419,218 @@ async def test_auth_probe_loop_ignores_non_auth_exception():
         pass
 
     assert not daemon._degraded.is_set()
+
+
+# ---------------------------------------------------------------------------
+# cooldown_seconds — gate per folder (ADR-004)
+# ---------------------------------------------------------------------------
+
+async def test_cooldown_disabled_processes_every_event():
+    """cooldown_seconds=0 (default) preserva o comportamento atual."""
+    folder = _folder(cooldown_seconds=0)
+    daemon = SyncDaemon(_make_config([folder]))
+
+    processed: list[str] = []
+
+    async def mock_bisync(f: FolderConfig) -> bool:
+        processed.append(f.name)
+        return True
+
+    daemon.engine.bisync_folder = mock_bisync
+
+    await daemon.queue.put(folder.name)
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.15)
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    assert len(processed) == 2
+    assert daemon._cooldown_scheduled == set()
+
+
+async def test_cooldown_event_inside_window_is_deferred():
+    """Evento dentro da janela cria task diferida e não chama _process_folder."""
+    folder = _folder(cooldown_seconds=60)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    daemon._last_sync_at[folder.name] = loop.time()  # janela acabou de abrir
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.1)
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    daemon.engine.bisync_folder.assert_not_called()
+    assert folder.name in daemon._cooldown_scheduled
+    assert len(daemon._cooldown_tasks) == 1
+
+
+async def test_cooldown_subsequent_events_are_absorbed():
+    """Eventos extras na mesma janela não criam tasks adicionais."""
+    folder = _folder(cooldown_seconds=60)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    daemon._last_sync_at[folder.name] = loop.time()
+    for _ in range(5):
+        await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.1)
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    daemon.engine.bisync_folder.assert_not_called()
+    assert len(daemon._cooldown_tasks) == 1
+
+
+async def test_cooldown_after_window_processes_normally():
+    """Com last_sync_at fora da janela, evento processa e atualiza o timestamp."""
+    folder = _folder(cooldown_seconds=1)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    daemon._last_sync_at[folder.name] = loop.time() - 10  # bem fora da janela
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.15)
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    daemon.engine.bisync_folder.assert_called_once_with(folder)
+    assert daemon._last_sync_at[folder.name] > loop.time() - 1  # atualizado from-start
+
+
+async def test_cooldown_deferred_task_reenqueues_after_window():
+    """Task diferida acorda no fim da janela e re-enfileira o folder."""
+    folder = _folder(cooldown_seconds=1)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    # Janela quase no fim — sobra ~50ms para o sleep da task diferida acordar.
+    daemon._last_sync_at[folder.name] = loop.time() - folder.cooldown_seconds + 0.05
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.2)
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    daemon.engine.bisync_folder.assert_called_once_with(folder)
+    assert folder.name not in daemon._cooldown_scheduled
+
+
+async def test_cooldown_deferred_task_cancelled_on_shutdown():
+    """Cancellation simulando shutdown não re-enfileira e não vaza estado."""
+    folder = _folder(cooldown_seconds=60)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    daemon._last_sync_at[folder.name] = loop.time()
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.05)  # deixa o worker criar a task diferida
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    assert len(daemon._cooldown_tasks) == 1
+    qsize_before = daemon.queue.qsize()
+    for task in list(daemon._cooldown_tasks):
+        task.cancel()
+    await asyncio.gather(*daemon._cooldown_tasks, return_exceptions=True)
+
+    assert daemon.queue.qsize() == qsize_before  # não re-enfileirou
+
+
+async def test_cooldown_deferred_drops_when_degraded_on_wakeup():
+    """Task diferida que acorda durante degraded deposita na queue; worker descarta."""
+    folder = _folder(cooldown_seconds=1)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon._notifier = MagicMock()
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    # Mesma técnica da janela curta — task diferida acorda em ~50ms.
+    daemon._last_sync_at[folder.name] = loop.time() - folder.cooldown_seconds + 0.05
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.02)  # worker cria a task diferida
+    daemon._enter_degraded("simulado para teste")
+    await asyncio.sleep(0.2)  # task diferida acorda durante degraded
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    daemon.engine.bisync_folder.assert_not_called()
+
+
+async def test_cooldown_gates_periodic_full_sync():
+    """Enfileiramentos do periodic_full_sync passam pelo mesmo gate (ADR-004)."""
+    folder = _folder(cooldown_seconds=60)
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    loop = asyncio.get_running_loop()
+    daemon._last_sync_at[folder.name] = loop.time()  # janela aberta
+
+    # Periodic_full_sync apenas faz queue.put — simulamos isso diretamente.
+    await daemon.queue.put(folder.name)
+
+    daemon._stop_event = asyncio.Event()
+    worker = asyncio.create_task(daemon._worker(0))
+    await asyncio.sleep(0.1)
+    daemon._stop_event.set()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    daemon.engine.bisync_folder.assert_not_called()
+    assert folder.name in daemon._cooldown_scheduled
