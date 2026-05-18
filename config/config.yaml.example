@@ -141,6 +141,12 @@ watcher:
   max_concurrent_jobs: 3
   periodic_full_sync_seconds: 3600
   startup_delay_seconds: 30
+  # Pasta sem bisync bem-sucedido há > N segundos vira degraded — STATUS agregada
+  # via sd_notify + notify-send + log [FOLDER_DEGRADED]. Per-folder, sem pausa
+  # global (escopo distinto do auth degraded de ADR-003). Default 12h (43200s).
+  # Use 0 para desligar (opt-out). Quando > 0, exige periodic_full_sync_seconds > 0
+  # (detecção piggyback no loop periódico — ADR-005).
+  folder_staleness_threshold_seconds: 43200
 
 dedupe:
   skip_subpaths_of_configured_folders: true
