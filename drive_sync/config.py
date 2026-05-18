@@ -61,6 +61,7 @@ class WatcherConfig:
     max_concurrent_jobs: int = 3
     periodic_full_sync_seconds: int = 1800
     startup_delay_seconds: int = 15
+    folder_staleness_threshold_seconds: int = 43200
 
 
 @dataclass
@@ -178,11 +179,28 @@ def load_config(path: Path | None = None) -> AppConfig:
     )
 
     w_raw = raw.get("watcher", {}) or {}
+    folder_staleness_threshold_seconds = int(
+        w_raw.get("folder_staleness_threshold_seconds", 43200)
+    )
+    periodic_full_sync_seconds = int(w_raw.get("periodic_full_sync_seconds", 1800))
+    if folder_staleness_threshold_seconds < 0:
+        raise ValueError(
+            f"folder_staleness_threshold_seconds inválido: "
+            f"{folder_staleness_threshold_seconds} (deve ser >= 0; use 0 para desligar)"
+        )
+    if folder_staleness_threshold_seconds > 0 and periodic_full_sync_seconds <= 0:
+        raise ValueError(
+            "folder_staleness_threshold_seconds > 0 requer "
+            "watcher.periodic_full_sync_seconds > 0 (detecção piggyback no loop "
+            "periódico — ADR-005). Defina folder_staleness_threshold_seconds=0 "
+            "para opt-out, ou habilite periodic full-sync."
+        )
     watcher = WatcherConfig(
         queue_size=int(w_raw.get("queue_size", 1000)),
         max_concurrent_jobs=int(w_raw.get("max_concurrent_jobs", 3)),
-        periodic_full_sync_seconds=int(w_raw.get("periodic_full_sync_seconds", 1800)),
+        periodic_full_sync_seconds=periodic_full_sync_seconds,
         startup_delay_seconds=int(w_raw.get("startup_delay_seconds", 15)),
+        folder_staleness_threshold_seconds=folder_staleness_threshold_seconds,
     )
 
     d_raw = raw.get("dedupe", {}) or {}
