@@ -130,7 +130,7 @@ class SyncDaemon:
         for repo in repos:
             rel = repo.relative_to(root) if repo != root else Path(repo.name)
             local_bundle = bundle_path_for(
-                repo, root, self.cfg.git.bundles_dir / folder.name, self.cfg.git.bundle_suffix
+                repo, root, self.cfg.git.bundles_dir / folder.fs_key, self.cfg.git.bundle_suffix
             )
             remote_rel = str(rel.with_suffix(rel.suffix + self.cfg.git.bundle_suffix))
 

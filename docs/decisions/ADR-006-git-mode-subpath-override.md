@@ -53,6 +53,7 @@ Razões:
 ### Limitações
 
 - Sem nested overrides. Loader rejeita `subpath_overrides` em folder synthetic (não-recursivo); operador não pode override de override. Aceitável — caso não emerge empiricamente.
+- Sem overlapping subpaths no mesmo parent. Loader rejeita pares `(a, a/b)` ou `(a/b, a)` com erro `"sobreposição não permitida"`. Aceitável — sobreposição produziria globs redundantes no `parent.exclude` (`a/**` cobrindo `a/b/**`) e ambiguidade de routing resolvida só implicitamente por `owning_folder()`; rejeitar é mais claro. Caso emerja empiricamente, reabrir e considerar delegação a `owning_folder()`.
 - Sem auto-fallback após N falhas. Decisão consciente: config explícito > inferência (alinha com a doutrina do projeto). Operador escolhe `git_mode: bundle` quando aprende que o subpath é problemático.
 - Migração do config local é manual (operador edita `~/.config/drive-sync/config.yaml` pós-merge). O config de exemplo em `config/config.yaml.example` é atualizado pelo plano para mostrar a forma nova; não há script de migração automática (config local é gitignored, fora do escopo do código).
 

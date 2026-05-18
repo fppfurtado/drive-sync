@@ -72,6 +72,8 @@ Non-obvious behaviors that have caused multi-day incidents — preserve them:
 
 The `bundle` mode is opt-in. `bisync` is the preferred default because it syncs uncommitted changes and keeps the cloud copy as a usable git repo.
 
+Cada folder pode adicionalmente declarar `subpath_overrides: [{subpath, git_mode}]` para subpastas específicas — expansão acontece em `load_config` e o runtime vê apenas a lista plana ([ADR-006](../docs/decisions/ADR-006-git-mode-subpath-override.md)).
+
 ## Config Location
 
 Runtime config: `~/.config/drive-sync/config.yaml` (or `$XDG_CONFIG_HOME/drive-sync/config.yaml`).

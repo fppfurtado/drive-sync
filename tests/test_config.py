@@ -246,3 +246,304 @@ def test_health_check_custom_interval(tmp_path):
     """)
     app = load_config(cfg)
     assert app.health_check.interval_seconds == 60
+
+
+# ---------------------------------------------------------------------------
+# subpath_overrides (ADR-006) — expansão em FolderConfig synthetic
+# ---------------------------------------------------------------------------
+
+def test_fs_key_defaults_to_name_for_plain_folder(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: dev-projects
+            local_path: /tmp/projects
+            remote_subpath: dev/projects
+    """)
+    app = load_config(cfg)
+    assert app.folders[0].fs_key == "dev-projects"
+
+
+def test_subpath_override_expands_into_synthetic_folder(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: dev-projects
+            local_path: /tmp/projects
+            remote_subpath: dev/projects
+            cooldown_seconds: 3600
+            debounce_seconds: 40
+            auto_exclude: false
+            subpath_overrides:
+              - subpath: tjpa/pje-2.1
+                git_mode: bundle
+    """)
+    app = load_config(cfg)
+    assert len(app.folders) == 2
+
+    parent, synthetic = app.folders
+    assert parent.name == "dev-projects"
+    assert parent.git_mode == "bisync"  # default preservado, override só afeta synthetic
+    assert synthetic.name == "dev-projects/tjpa/pje-2.1"
+    assert synthetic.fs_key == "dev-projects-tjpa-pje-2.1"
+    assert synthetic.git_mode == "bundle"
+    assert synthetic.local_path == Path("/tmp/projects/tjpa/pje-2.1")
+    assert synthetic.remote_subpath == "dev/projects/tjpa/pje-2.1"
+    # Demais campos herdam do parent.
+    assert synthetic.cooldown_seconds == 3600
+    assert synthetic.debounce_seconds == 40
+    assert synthetic.auto_exclude is False
+    assert synthetic.enabled is True
+    # Não-recursivo.
+    assert synthetic.subpath_overrides == []
+
+
+def test_subpath_override_injects_glob_in_parent_exclude(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: dev-projects
+            local_path: /tmp/projects
+            remote_subpath: dev/projects
+            subpath_overrides:
+              - subpath: tjpa/pje-2.1
+                git_mode: bundle
+    """)
+    app = load_config(cfg)
+    parent = app.folders[0]
+    assert "tjpa/pje-2.1/**" in parent.exclude
+
+
+def test_subpath_override_redundant_exclude_warns(tmp_path, caplog):
+    """Operador declara exclude E subpath_overrides — loader não duplica, emite WARNING."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: dev-projects
+            local_path: /tmp/projects
+            remote_subpath: dev/projects
+            exclude:
+              - "tjpa/pje-2.1/**"
+            subpath_overrides:
+              - subpath: tjpa/pje-2.1
+                git_mode: bundle
+    """)
+    with caplog.at_level("WARNING", logger="drive_sync.config"):
+        app = load_config(cfg)
+    parent = app.folders[0]
+    assert parent.exclude.count("tjpa/pje-2.1/**") == 1
+    assert any(
+        "exclude redundante" in r.message and "tjpa/pje-2.1/**" in r.message
+        for r in caplog.records
+    )
+
+
+def test_two_overrides_expand_in_order(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: dev-projects
+            local_path: /tmp/projects
+            remote_subpath: dev/projects
+            subpath_overrides:
+              - subpath: a/repo-x
+                git_mode: bundle
+              - subpath: b/repo-y
+                git_mode: "off"
+    """)
+    app = load_config(cfg)
+    assert [f.name for f in app.folders] == [
+        "dev-projects",
+        "dev-projects/a/repo-x",
+        "dev-projects/b/repo-y",
+    ]
+    parent = app.folders[0]
+    assert "a/repo-x/**" in parent.exclude
+    assert "b/repo-y/**" in parent.exclude
+
+
+def test_synthetic_inherits_parent_user_excludes(tmp_path):
+    """Synthetic clona exclude do parent ANTES do auto-inject do glob (não inclui self)."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: dev-projects
+            local_path: /tmp/projects
+            remote_subpath: dev/projects
+            exclude:
+              - "*.local"
+            subpath_overrides:
+              - subpath: sub
+                git_mode: bundle
+    """)
+    app = load_config(cfg)
+    synthetic = app.folders[1]
+    assert "*.local" in synthetic.exclude
+    assert "sub/**" not in synthetic.exclude
+
+
+def test_subpath_empty_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: ""
+                git_mode: bundle
+    """)
+    with pytest.raises(ValueError, match="subpath vazio"):
+        load_config(cfg)
+
+
+def test_subpath_absolute_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: /absolute
+                git_mode: bundle
+    """)
+    with pytest.raises(ValueError, match="absoluto"):
+        load_config(cfg)
+
+
+def test_subpath_with_dotdot_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: a/../b
+                git_mode: bundle
+    """)
+    with pytest.raises(ValueError, match=r"\.\."):
+        load_config(cfg)
+
+
+def test_override_invalid_git_mode_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: sub
+                git_mode: bogus
+    """)
+    with pytest.raises(ValueError, match="bogus"):
+        load_config(cfg)
+
+
+def test_duplicate_subpath_in_same_parent_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: sub
+                git_mode: bundle
+              - subpath: sub
+                git_mode: "off"
+    """)
+    with pytest.raises(ValueError, match="duplicado"):
+        load_config(cfg)
+
+
+def test_synthetic_name_collision_when_other_folder_declared_first(tmp_path):
+    """Folder declarado primeiro → expansão de synthetic colide ('colide')."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: parent/collision
+            local_path: /tmp/other
+            remote_subpath: O
+          - name: parent
+            local_path: /tmp/parent
+            remote_subpath: P
+            subpath_overrides:
+              - subpath: collision
+                git_mode: bundle
+    """)
+    with pytest.raises(ValueError, match="colide"):
+        load_config(cfg)
+
+
+def test_synthetic_name_collision_when_synthetic_added_first(tmp_path):
+    """Synthetic adicionado primeiro → segundo folder cai no check de duplicado ('duplicado')."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: parent
+            local_path: /tmp/parent
+            remote_subpath: P
+            subpath_overrides:
+              - subpath: collision
+                git_mode: bundle
+          - name: parent/collision
+            local_path: /tmp/other
+            remote_subpath: O
+    """)
+    with pytest.raises(ValueError, match="duplicado"):
+        load_config(cfg)
+
+
+def test_synthetic_inherits_disabled_from_parent(tmp_path):
+    """ADR-006: enabled herda do parent — desabilitar parent desabilita synthetic."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: parent
+            local_path: /tmp/parent
+            remote_subpath: P
+            enabled: false
+            subpath_overrides:
+              - subpath: sub
+                git_mode: bundle
+    """)
+    app = load_config(cfg)
+    assert app.folders[0].enabled is False
+    assert app.folders[1].enabled is False
+
+
+def test_override_missing_git_mode_raises(tmp_path):
+    """Chave git_mode omitida no override → ValueError (caso mais provável que valor 'bogus')."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: sub
+    """)
+    with pytest.raises(ValueError, match="git_mode"):
+        load_config(cfg)
+
+
+def test_overlapping_subpaths_in_same_parent_raises(tmp_path):
+    """ADR-006: dois subpaths sobrepostos no mesmo parent não são tolerados."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: a
+                git_mode: bundle
+              - subpath: a/b
+                git_mode: bundle
+    """)
+    with pytest.raises(ValueError, match="aninhado"):
+        load_config(cfg)
+
+
+def test_overlapping_subpaths_reverse_order_raises(tmp_path):
+    """Ordem inversa do anterior — mais específico declarado antes."""
+    cfg = _write_yaml(tmp_path, """
+        folders:
+          - name: x
+            local_path: /tmp/x
+            remote_subpath: X
+            subpath_overrides:
+              - subpath: a/b
+                git_mode: bundle
+              - subpath: a
+                git_mode: bundle
+    """)
+    with pytest.raises(ValueError, match="aninhado"):
+        load_config(cfg)
