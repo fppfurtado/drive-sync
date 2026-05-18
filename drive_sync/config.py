@@ -56,6 +56,12 @@ def _parse_subpath_overrides(
                 f"subpath_overrides em {parent_name!r}: subpath {raw_subpath!r} "
                 f"duplicado"
             )
+        for prior in seen_subpaths:
+            if subpath.startswith(prior + "/") or prior.startswith(subpath + "/"):
+                raise ValueError(
+                    f"subpath_overrides em {parent_name!r}: subpath {raw_subpath!r} "
+                    f"está aninhado com {prior!r} — sobreposição não permitida"
+                )
         seen_subpaths.add(subpath)
         overrides.append(SubpathOverride(subpath=subpath, git_mode=git_mode))
     return overrides
