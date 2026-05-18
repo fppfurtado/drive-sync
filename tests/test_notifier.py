@@ -260,3 +260,65 @@ def test_socket_timeout_is_silenced(monkeypatch, isolated_env):
     monkeypatch.setattr("drive_sync.notifier.socket.socket", _TimingOutSocket)
 
     Notifier().ready()
+
+
+# ---------------------------------------------------------------------------
+# folder_degraded (ADR-005): log + notify-send, sem sd_notify
+# ---------------------------------------------------------------------------
+
+def test_folder_degraded_does_not_open_socket(monkeypatch, isolated_env, fake_sockets):
+    """STATUS agregada é do daemon — folder_degraded NÃO emite sd_notify."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "/run/notify.sock")
+    monkeypatch.setattr(
+        "drive_sync.notifier.subprocess.run", lambda *a, **kw: MagicMock()
+    )
+
+    Notifier().folder_degraded("alpha", "sem sucesso há 13.0h")
+
+    assert fake_sockets == []
+
+
+def test_folder_degraded_fires_notify_send(monkeypatch, isolated_env):
+    """Canal de desktop dispara com summary identificando a pasta."""
+    monkeypatch.setenv("DISPLAY", ":0")
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        "drive_sync.notifier.subprocess.run",
+        lambda args, **kw: captured.append(args) or MagicMock(),
+    )
+
+    Notifier().folder_degraded("alpha", "sem sucesso há 13.0h")
+
+    assert len(captured) == 1
+    assert captured[0][0] == "notify-send"
+    summary_and_body = " ".join(captured[0])
+    assert "alpha" in summary_and_body
+    assert "13.0h" in summary_and_body
+
+
+def test_folder_degraded_logs_critical_with_tag(monkeypatch, isolated_env, caplog):
+    """Tag [FOLDER_DEGRADED] permite grep operacional distinto de AUTH_DEGRADED."""
+    monkeypatch.setattr(
+        "drive_sync.notifier.subprocess.run", lambda *a, **kw: MagicMock()
+    )
+
+    import logging as _logging
+
+    with caplog.at_level(_logging.CRITICAL, logger="drive_sync.notifier"):
+        Notifier().folder_degraded("alpha", "sem sucesso há 13.0h")
+
+    assert any(
+        "[FOLDER_DEGRADED]" in r.message and "alpha" in r.message
+        for r in caplog.records
+    )
+
+
+def test_send_status_emits_payload_verbatim(monkeypatch, isolated_env, fake_sockets):
+    """Daemon compõe STATUS agregada e delega só o transporte (ADR-005)."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "/run/notify.sock")
+
+    Notifier().send_status("STATUS=degraded folders: alpha (r1), beta (r2)")
+
+    assert fake_sockets[0].sendto_calls == [
+        (b"STATUS=degraded folders: alpha (r1), beta (r2)\n", "/run/notify.sock"),
+    ]
