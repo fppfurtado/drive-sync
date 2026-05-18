@@ -26,6 +26,15 @@ class Notifier:
         self._systemd_notify(f"STATUS=degraded: {reason}")
         self._notify_send("drive-sync degraded", reason)
 
+    def folder_degraded(self, folder: str, reason: str) -> None:
+        """Sinaliza folder degradado (ADR-005). STATUS agregada é responsabilidade do daemon."""
+        log.critical("[FOLDER_DEGRADED] %s: %s", folder, reason)
+        self._notify_send(f"drive-sync — {folder} degraded", reason)
+
+    def send_status(self, payload: str) -> None:
+        """Permite ao daemon emitir STATUS composta diretamente (ADR-005)."""
+        self._systemd_notify(payload)
+
     def ready(self) -> None:
         """Emite READY=1 ao systemd — exigido sob Type=notify (ADR-003)."""
         self._systemd_notify("READY=1")

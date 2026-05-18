@@ -88,7 +88,9 @@ class SyncDaemon:
 
         if success:
             self._last_successful_sync_at[folder.name] = time.time()
-            self._degraded_folders.pop(folder.name, None)
+            was_degraded = self._degraded_folders.pop(folder.name, None) is not None
+            if was_degraded:
+                self._notifier.send_status(self._compose_status_payload())
         return success
 
     # ------------------------------------------------------------------
@@ -235,12 +237,25 @@ class SyncDaemon:
         self._cooldown_scheduled.discard(folder_name)
         await self.queue.put(folder_name)
 
+    def _compose_status_payload(self) -> str:
+        """Compõe STATUS sd_notify com precedência auth > folder (ADR-005)."""
+        if self._degraded.is_set():
+            return f"STATUS=degraded: {self._degraded_reason}"
+        if self._degraded_folders:
+            ordered = ", ".join(
+                f"{name} ({self._degraded_folders[name]})"
+                for name in sorted(self._degraded_folders)
+            )
+            return f"STATUS=degraded folders: {ordered}"
+        return "STATUS="
+
     def _check_folder_staleness(self) -> None:
         """Marca como degraded pastas sem sucesso há > threshold (ADR-005)."""
         threshold = self.cfg.watcher.folder_staleness_threshold_seconds
         if threshold <= 0:
             return
         now = time.time()
+        changed = False
         for f in self.cfg.folders:
             if not f.enabled or f.name in self._degraded_folders:
                 continue
@@ -249,7 +264,10 @@ class SyncDaemon:
             if elapsed > threshold:
                 reason = f"sem sucesso há {elapsed / 3600:.1f}h"
                 self._degraded_folders[f.name] = reason
-                log.critical("[FOLDER_DEGRADED] %s: %s", f.name, reason)
+                self._notifier.folder_degraded(f.name, reason)
+                changed = True
+        if changed:
+            self._notifier.send_status(self._compose_status_payload())
 
     async def _periodic_full_sync(self) -> None:
         interval = self.cfg.watcher.periodic_full_sync_seconds
