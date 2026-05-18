@@ -112,7 +112,11 @@ Tudo no `config.yaml`:
 - **folders[]**: por tarefa — caminho local, subpath remoto, `enabled`,
   `git_mode` (`off`/`bisync`/`bundle`), `auto_exclude`, padrões `exclude`,
   `debounce_seconds`, `cooldown_seconds` (rate-limit por pasta; opt-in para
-  folders com custo de sync alto, ex.: bundle mode em repo `.git/` grande).
+  folders com custo de sync alto, ex.: bundle mode em repo `.git/` grande),
+  `subpath_overrides` (override de `git_mode` por subpasta — ADR-006; cooldown
+  e demais campos herdam do parent; expansão acontece no `load_config` em
+  folders synthetic, então `drive-sync --status` mostra a lista pós-expansão
+  enquanto `drive-sync-folder list` opera sobre o YAML cru).
 - **git**: diretório dos bundles, sufixo, `bundle_all`, `recursive_detection`,
   `max_recursion_depth`.
 - **watcher**: tamanho da fila, `max_concurrent_jobs`, sync periódica de
