@@ -41,6 +41,11 @@ folders:
     debounce_seconds: 40
     exclude:
       - "*.local"
+    # Override de git_mode por subpath (ADR-006). Demais campos (cooldown,
+    # debounce, exclude) herdam do parent.
+    # subpath_overrides:
+    #   - subpath: "tjpa/pje-2.1"
+    #     git_mode: "bundle"
 
   - name: "dev-scripts"
     local_path: "~/dev/scripts"
