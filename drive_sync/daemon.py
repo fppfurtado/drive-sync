@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from pathlib import Path
 
 from .config import AppConfig, FolderConfig
@@ -44,6 +45,10 @@ class SyncDaemon:
         self._last_sync_at: dict[str, float] = {}
         self._cooldown_scheduled: set[str] = set()
         self._cooldown_tasks: set[asyncio.Task[None]] = set()
+        # Staleness per-folder (ADR-005): wall-clock.
+        self._last_successful_sync_at: dict[str, float] = {}
+        self._degraded_folders: dict[str, str] = {}
+        self._daemon_start_time: float = time.time()
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
 
@@ -70,15 +75,21 @@ class SyncDaemon:
         """
         return folder.git_mode == "bundle"
 
-    async def _process_folder(self, folder: FolderConfig) -> None:
-        """Processa uma tarefa de sincronização, fim a fim."""
+    async def _process_folder(self, folder: FolderConfig) -> bool:
+        """Processa uma tarefa de sincronização, fim a fim. Retorna True em sucesso."""
         log.info("[%s] Iniciando job (modo=%s).", folder.name, folder.git_mode)
 
         if self._is_bundle_flow(folder):
             await self._sync_git_folder(folder)
+            success = True
         else:
             # Modos "bisync" e "off" caem aqui — diferença está só nos excludes.
-            await self.engine.bisync_folder(folder)
+            success = await self.engine.bisync_folder(folder)
+
+        if success:
+            self._last_successful_sync_at[folder.name] = time.time()
+            self._degraded_folders.pop(folder.name, None)
+        return success
 
     # ------------------------------------------------------------------
     # Fluxo para pastas Git: empacota e sobe somente o(s) bundle(s).
@@ -224,6 +235,22 @@ class SyncDaemon:
         self._cooldown_scheduled.discard(folder_name)
         await self.queue.put(folder_name)
 
+    def _check_folder_staleness(self) -> None:
+        """Marca como degraded pastas sem sucesso há > threshold (ADR-005)."""
+        threshold = self.cfg.watcher.folder_staleness_threshold_seconds
+        if threshold <= 0:
+            return
+        now = time.time()
+        for f in self.cfg.folders:
+            if not f.enabled or f.name in self._degraded_folders:
+                continue
+            last = self._last_successful_sync_at.get(f.name, self._daemon_start_time)
+            elapsed = now - last
+            if elapsed > threshold:
+                reason = f"sem sucesso há {elapsed / 3600:.1f}h"
+                self._degraded_folders[f.name] = reason
+                log.critical("[FOLDER_DEGRADED] %s: %s", f.name, reason)
+
     async def _periodic_full_sync(self) -> None:
         interval = self.cfg.watcher.periodic_full_sync_seconds
         if interval <= 0:
@@ -236,6 +263,7 @@ class SyncDaemon:
                 pass
             if self._degraded.is_set():
                 continue
+            self._check_folder_staleness()
             log.info("Sincronização periódica de rede de segurança disparada.")
             for f in self.cfg.folders:
                 if f.enabled:
