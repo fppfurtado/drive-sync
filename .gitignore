@@ -8,5 +8,6 @@ __pycache__/
 config/config.yaml
 
 .claude/settings.json
+.claude/local/
 
 .worktrees/
