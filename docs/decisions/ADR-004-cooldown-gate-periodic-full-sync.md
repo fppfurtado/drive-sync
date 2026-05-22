@@ -5,7 +5,7 @@
 
 ## Origem
 
-- **Investigação:** plano [folder-sync-cooldown](../plans/folder-sync-cooldown.md) durante `/triage` 2026-05-14. O design-reviewer flagou que cobrir também o `periodic_full_sync` é decisão estrutural duradoura (modifica safety-net global documentada em `.claude/CLAUDE.md`), exigindo ADR antes da implementação. Caso real disparador: incidente 2026-05-13/14 com `tjpa/pje-2.1` sob `git_mode: bundle` (bundle multi-GB re-uploadado por ciclo do periodic, custo proibitivo).
+- **Investigação:** plano [folder-sync-cooldown](../plans/folder-sync-cooldown.md) durante `/triage` 2026-05-14. O design-reviewer flagou que cobrir também o `periodic_full_sync` é decisão estrutural duradoura (modifica safety-net global documentada em `CLAUDE.md`), exigindo ADR antes da implementação. Caso real disparador: incidente 2026-05-13/14 com `tjpa/pje-2.1` sob `git_mode: bundle` (bundle multi-GB re-uploadado por ciclo do periodic, custo proibitivo).
 
 ## Contexto
 
@@ -16,7 +16,7 @@ O daemon `drive-sync` tem duas fontes de enfileiramento por folder:
 
 A introdução de `cooldown_seconds` por folder (plano `folder-sync-cooldown`) cria uma decisão semântica: o gate cobre apenas eventos do watcher, ou também os ciclos do `periodic_full_sync`?
 
-A escolha modifica um invariante implícito documentado em `.claude/CLAUDE.md` ("periodic full-sync task at a configurable interval", sem ressalvas): hoje o periodic é safety-net garantida — toda pasta sincroniza no máximo a cada `periodic_full_sync_seconds`. Mudar isso é decisão estrutural duradoura, daí o ADR.
+A escolha modifica um invariante implícito documentado em `CLAUDE.md` ("periodic full-sync task at a configurable interval", sem ressalvas): hoje o periodic é safety-net garantida — toda pasta sincroniza no máximo a cada `periodic_full_sync_seconds`. Mudar isso é decisão estrutural duradoura, daí o ADR.
 
 ## Decisão
 

@@ -14,7 +14,7 @@ Race condition no token refresh do backend protondrive do rclone quando ≥2 ins
 
 A configuração atual do projeto materializa o cenário vulnerável: cada job em [`drive_sync/sync_engine.py`](../../drive_sync/sync_engine.py) spawna `asyncio.create_subprocess_exec(rclone, ...)` independentemente, e o `Semaphore(max_concurrent_jobs=3)` em [`drive_sync/daemon.py:33`](../../drive_sync/daemon.py) permite até 3 instâncias rclone em paralelo. O `periodic_full_sync` (a cada 3.600s, enfileira 12 pastas) garante janelas recorrentes em que isso acontece.
 
-A premissa original do daemon — "sync assíncrona, arquivo grande não bloqueia outros" ([.claude/CLAUDE.md](../../.claude/CLAUDE.md)) — colide com restrição externa do upstream: o backend protondrive não suporta concorrência segura.
+A premissa original do daemon — "sync assíncrona, arquivo grande não bloqueia outros" ([CLAUDE.md](../../CLAUDE.md)) — colide com restrição externa do upstream: o backend protondrive não suporta concorrência segura.
 
 ## Decisão
 

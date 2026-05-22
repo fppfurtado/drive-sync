@@ -77,14 +77,14 @@ Fora de escopo:
 
 ### Bloco 4 — invariante operacional na documentação {reviewer: doc}
 
-- `.claude/CLAUDE.md`, seção "Operational Invariants":
+- `CLAUDE.md`, seção "Operational Invariants":
   - Adicionar bullet sobre `cooldown_seconds`: opt-in por folder; quando setado, gate-keia tanto eventos do watcher quanto ciclos do `periodic_full_sync` para aquela pasta; sem persistência cross-restart (cooldown reseta, pior caso 1 upload extra); motivação principal é `git_mode: bundle` em repo com `.git/` grande (rclone não faz delta upload de blob).
 
 ## Verificação end-to-end
 
 - `python -m pytest tests/ -v` passa, incluindo os novos testes de cooldown.
 - `python -m drive_sync --check` aceita `cooldown_seconds: 14400` em uma entry de folder do `config.yaml` real sem erro de validação; aceita ausência (default 0).
-- `grep -n cooldown_seconds drive_sync/config.py drive_sync/daemon.py config/config.yaml.example .claude/CLAUDE.md` retorna ocorrências consistentes em todos os arquivos esperados.
+- `grep -n cooldown_seconds drive_sync/config.py drive_sync/daemon.py config/config.yaml.example CLAUDE.md` retorna ocorrências consistentes em todos os arquivos esperados.
 
 ## Verificação manual
 

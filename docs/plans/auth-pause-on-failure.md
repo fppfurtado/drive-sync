@@ -83,7 +83,7 @@ Esta é defesa em profundidade: a serialização aplicada via ADR-001 reduz a fr
 
 ### Bloco 6 — atualização de documentação operacional {reviewer: doc}
 
-- `.claude/CLAUDE.md` — nova entrada em "Operational Invariants":
+- `CLAUDE.md` — nova entrada em "Operational Invariants":
   - "**Daemon degraded em falha de auth (complementa, não substitui, o invariante `bisync errors do NOT auto-recover`)**: erros bisync genéricos continuam logando e seguindo; apenas falha de auth identificada (`Code=8002`/`Code=9001` no endpoint `/api/auth/v4`) dispara pausa global dos workers e sinalização via `systemctl status` (`STATUS=degraded: ...`), `notify-send` e log tagueado `[AUTH_DEGRADED]`. Recuperação manual: `rclone config update proton 2fa <code>` + `systemctl --user restart drive-sync`. Sem auto-resume — flakiness lateral da Proton pode mascarar problemas residuais."
 - `config/config.yaml` — documentar `health_check`.
 

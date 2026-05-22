@@ -95,7 +95,7 @@ Schema novo em `FolderConfig`: campo `fs_key: str` separado de `name`. `name` pr
 ### Bloco 3 — docs {reviewer: doc}
 
 - `README.md`: bullet `folders[]` em "Configuração" ganha menção a `subpath_overrides` com 1 frase de propósito + link conceitual a ADR-006.
-- `.claude/CLAUDE.md` → **`## git_mode Semantics`** (alvo canônico — tabela já existe lá): adicionar 1 frase logo após a tabela: "Cada folder pode adicionalmente declarar `subpath_overrides: [{subpath, git_mode}]` para subpastas específicas — expansão acontece em `load_config` e o runtime vê apenas a lista plana — [ADR-006](../docs/decisions/ADR-006-git-mode-subpath-override.md)." Tabela em si não muda (3 modos seguem válidos).
+- `CLAUDE.md` → **`## git_mode Semantics`** (alvo canônico — tabela já existe lá): adicionar 1 frase logo após a tabela: "Cada folder pode adicionalmente declarar `subpath_overrides: [{subpath, git_mode}]` para subpastas específicas — expansão acontece em `load_config` e o runtime vê apenas a lista plana — [ADR-006](../docs/decisions/ADR-006-git-mode-subpath-override.md)." Tabela em si não muda (3 modos seguem válidos).
 
 ## Verificação end-to-end
 

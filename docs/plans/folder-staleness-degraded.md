@@ -85,7 +85,7 @@ Decisão (ADR-005): preservar Notifier stateless. Composição da STATUS final v
 ### Bloco 5 — docs: ADR-005, CLAUDE.md invariante, README {reviewer: doc}
 
 - `docs/decisions/ADR-005-*.md`: criado pelo `/new-adr` na fase de produção do /triage. Captura: extensão de ADR-003 (gatilho temporal per-folder), recusa de pausa per-folder, justificativa do default 12h, gatilhos de revisão (ex.: caso de pasta com `cooldown_seconds` muito longo gerar falso-alarme → considerar threshold per-folder).
-- `.claude/CLAUDE.md` (seção "Operational Invariants"): nova bullet referenciando ADR-005, explicando que folder-degraded é per-folder sem pausa, recuperação por sucesso, in-memory.
+- `CLAUDE.md` (seção "Operational Invariants"): nova bullet referenciando ADR-005, explicando que folder-degraded é per-folder sem pausa, recuperação por sucesso, in-memory.
 - `README.md` (se há seção de operação): documentar `folder_staleness_threshold_seconds` em `daemon:` no schema do config.yaml.
 
 ## Verificação end-to-end

@@ -60,7 +60,7 @@ Razões:
 
 ### Limitações
 
-- Não cobre a *causa-raiz* da abortagem (flakiness do backend protondrive ou de qualquer falha bisync). Apenas observabilidade — recuperação continua manual via `--resync`. Auto-recovery foi recusada por conflitar com o invariante `bisync errors do NOT auto-recover` ([CLAUDE.md → Operational Invariants](../../.claude/CLAUDE.md)).
+- Não cobre a *causa-raiz* da abortagem (flakiness do backend protondrive ou de qualquer falha bisync). Apenas observabilidade — recuperação continua manual via `--resync`. Auto-recovery foi recusada por conflitar com o invariante `bisync errors do NOT auto-recover` ([CLAUDE.md → Operational Invariants](../../CLAUDE.md)).
 - Detecção atrasa até ~12h. Para falhas que se manifestam em segundos (ex.: auth), continuar usando ADR-003. Os dois gatilhos coexistem.
 - Invocação manual fora do systemd (`python -m drive_sync` direto): `NOTIFY_SOCKET` ausente; canal sd_notify vira no-op (já coberto pelo Notifier em ADR-003). Log e `notify-send` continuam funcionando.
 
@@ -76,7 +76,7 @@ Pausar workers ao detectar pasta degradada simplificaria a sinalização (só pr
 
 ### Auto-`--resync` em pasta degradada
 
-Resolveria o sintoma sem intervenção manual, mas conflita com o invariante consciente `bisync errors do NOT auto-recover` ([CLAUDE.md](../../.claude/CLAUDE.md) → Operational Invariants). `--resync` é destrutivo (escolhe um lado como source-of-truth e pode sobrescrever mudanças remotas legítimas em janelas longas de divergência). **Recusada** — invariante existe por razão (segurança de dados); este ADR é sobre observabilidade, não sobre alterar a política de recuperação.
+Resolveria o sintoma sem intervenção manual, mas conflita com o invariante consciente `bisync errors do NOT auto-recover` ([CLAUDE.md](../../CLAUDE.md) → Operational Invariants). `--resync` é destrutivo (escolhe um lado como source-of-truth e pode sobrescrever mudanças remotas legítimas em janelas longas de divergência). **Recusada** — invariante existe por razão (segurança de dados); este ADR é sobre observabilidade, não sobre alterar a política de recuperação.
 
 ### Persistência cross-restart do contador
 
@@ -93,4 +93,4 @@ Disco-backed dict de `_last_successful_sync_at` sobreviveria a restarts. Mas res
 - Plano de execução: [docs/plans/folder-staleness-degraded.md](../plans/folder-staleness-degraded.md)
 - ADR anterior estendido: [ADR-003](ADR-003-type-notify-sinalizacao-degraded.md)
 - ADR de pattern in-memory alinhado: [ADR-004](ADR-004-cooldown-gate-periodic-full-sync.md)
-- Invariante referenciado: `.claude/CLAUDE.md` → "Operational Invariants" → `bisync errors do NOT auto-recover`.
+- Invariante referenciado: `CLAUDE.md` → "Operational Invariants" → `bisync errors do NOT auto-recover`.
