@@ -1,6 +1,6 @@
 # drive-sync
 
-Sincronização bidirecional de pastas locais com **Proton Drive** no Linux Fedora 43,
+Sincronização bidirecional de pastas locais com **Proton Drive** no Linux Fedora 44,
 usando `rclone bisync` por baixo, `inotify` (via `watchdog`) para detecção de
 mudanças, `git bundle` para projetos Git, e `systemd --user` para auto-start.
 
@@ -30,9 +30,16 @@ mudanças, `git bundle` para projetos Git, e `systemd --user` para auto-start.
 
 ---
 
-## Instalação no Fedora 43
+## Instalação no Fedora 44
+
+Pré-condição: deps base instaladas. O `install.sh` assume que `rclone`, `git`,
+`python3`, `python3-pip`, `pipx` e `fuse-overlayfs` já estão presentes — vêm
+do loadout cross-repo (pattern PR #7 do chezmoi) ou via `sudo dnf install`
+manual. O script não auto-instala para não quebrar em context non-interactive
+(ex.: fixup do `mr`).
 
 ```bash
+sudo dnf install -y rclone git python3 python3-pip pipx fuse-overlayfs  # se não vieram pelo loadout
 git clone <este-repositorio> drive-sync
 cd drive-sync
 bash scripts/install.sh
