@@ -1,0 +1,3 @@
+# Gitignored paths to replicate into worktrees created by /run-plan.
+
+.claude/

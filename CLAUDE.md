@@ -93,3 +93,12 @@ The reference config at [config/config.yaml](config/config.yaml) shows the full 
 - ADRs: `docs/decisions/ADR-*.md` — durable architectural decisions.
 - Plans: `docs/plans/*.md` — pre-fact implementation plans, kept after merge.
 - Backlog: `BACKLOG.md` — `## Próximos` and `## Concluídos` (kept as institutional memory; do not prune).
+
+## Pragmatic Toolkit
+
+<!-- pragmatic-toolkit:config -->
+```yaml
+paths:
+  plans_dir: local
+test_command: "uv run pytest -q --no-header"
+```
