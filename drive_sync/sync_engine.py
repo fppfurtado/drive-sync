@@ -29,10 +29,34 @@ log = logging.getLogger(__name__)
 # (rclone#7381, ADR-001). Pode ser removido se o backend migrar para lib/oauthutil.
 _rclone_lock = asyncio.Lock()
 
-# Casa apenas a combinação `(Code=N, Status=422)` para evitar substring espúrio
-# em mensagens que mencionam só "Code=8002" sem contexto.
-_AUTH_CODE_RE = re.compile(r"\(Code=(8002|9001),\s*Status=422\)")
-_AUTH_ENDPOINT = "/api/auth/v4"
+# Tabela canônica dos pares (code, status) reconhecidos pelo classificador.
+# Origem empírica de cada par:
+# - (8002, 422): incidente 2026-05-11 — Code=8002 em /api/auth/v4/2fa ("Incorrect login credentials").
+# - (9001, 422): cobertura preventiva — CAPTCHA na auth original; ainda não observado em produção.
+# - (10013, 400): incidente 2026-05-24 16:58 — /auth/v4/refresh ("Invalid refresh token").
+# - (2028, 422): incidente 2026-05-24 17:01 — /auth/v4 (CAPTCHA gate / suspect activity).
+_AUTH_CODES: dict[tuple[int, int], str] = {
+    (8002, 422): "invalid_credentials",
+    (9001, 422): "captcha_required",
+    (10013, 400): "refresh_token_invalid",
+    (2028, 422): "rate_limited",
+}
+
+# Regex composto: casa apenas pares (code, status) presentes em _AUTH_CODES.
+# Construção em alternation (em vez de regex genérico + filtro pós-match) preserva
+# a invariante de robustez a pares ruidosos no stderr — ex.: `(Code=9999, Status=500)`
+# de erro de socket precedendo o erro auth deixaria de ser silenciado.
+_AUTH_CODE_RE = re.compile(
+    r"\(Code=(?:(?:8002|9001|2028),\s*Status=422|10013,\s*Status=400)\)"
+)
+
+# Endpoint de auth aceita ambas as formas observadas em produção:
+# `/api/auth/v4` (histórico, 2026-05-11) e `/auth/v4` (atual, 2026-05-24 — Proton
+# mudou o path sem aviso). Aceita falso-positivo teórico `/v4/auth/v4` (não emitido).
+_AUTH_ENDPOINT_RE = re.compile(r"(?:/api)?/auth/v4")
+
+# Re-extrai (code, status) do match já validado, para lookup do kind em _AUTH_CODES.
+_AUTH_PAIR_RE = re.compile(r"Code=(\d+),\s*Status=(\d+)")
 
 
 class AuthDegradedError(RuntimeError):
@@ -50,15 +74,23 @@ class AuthDegradedError(RuntimeError):
 
 
 def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
-    """Detecta falha de auth do backend protondrive no stderr do rclone (None se não casa)."""
-    if _AUTH_ENDPOINT not in stderr:
+    """Detecta falha de auth conhecida do backend protondrive no stderr do rclone.
+
+    Cobre 4 pares (Code, Status) — ver `_AUTH_CODES`. Endpoint aceito: `/auth/v4`
+    com ou sem prefixo `/api/`. Retorna None quando não casa.
+    """
+    if _AUTH_ENDPOINT_RE.search(stderr) is None:
         return None
     match = _AUTH_CODE_RE.search(stderr)
     if match is None:
         return None
-    code = int(match.group(1))
-    kind = "invalid_credentials" if code == 8002 else "captcha_required"
-    return AuthDegradedError(kind=kind, code=code, stderr_tail=stderr.strip()[-500:])
+    pair = _AUTH_PAIR_RE.search(match.group(0))
+    code, status = int(pair.group(1)), int(pair.group(2))
+    return AuthDegradedError(
+        kind=_AUTH_CODES[(code, status)],
+        code=code,
+        stderr_tail=stderr.strip()[-500:],
+    )
 
 
 def _bisync_state_dir() -> Path:
@@ -92,7 +124,7 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
     """Roda processo de forma assíncrona e devolve (rc, stdout, stderr).
 
     Levanta `AuthDegradedError` quando o rclone retorna não-zero com stderr
-    casando padrão de falha de auth conhecida (Code=8002/9001). Demais erros
+    casando padrão de falha de auth conhecida (ver `_AUTH_CODES`). Demais erros
     retornam normalmente — caller é quem decide o que fazer.
     """
     log.debug("Executando: %s", " ".join(cmd))
@@ -126,8 +158,9 @@ class RcloneEngine:
         Outros erros (rede, rate-limit transitório) são silenciados — probe não
         deve degradar o daemon por falha não-auth.
         """
-        # `about` exercita o endpoint /api/auth/v4 sem listar conteúdo (payload
-        # mínimo) — força exatamente o caminho que falha com Code=8002/9001.
+        # `about` exercita o endpoint de auth sem listar conteúdo (payload
+        # mínimo) — força exatamente o caminho que falha com os códigos
+        # classificados em `_AUTH_CODES`.
         remote = f"{self.app.rclone.remote_name}:"
         cmd = self._base_cmd() + ["about", remote]
         try:
