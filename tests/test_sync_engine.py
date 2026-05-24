@@ -343,7 +343,8 @@ async def test_run_releases_lock_on_subprocess_exception(monkeypatch):
 # _classify_rclone_stderr — detecção de falha de auth conhecida
 # ---------------------------------------------------------------------------
 
-# Amostras reais do journal de 2026-05-11 — preservar literais.
+# Amostras reais — preservar literais.
+# Path histórico (2026-05-11): /api/auth/v4/...
 _STDERR_8002 = (
     'CRITICAL: Failed to create file system for "proton:Sync/dev/projects": '
     "couldn't initialize a new proton drive instance: 422 POST "
@@ -355,6 +356,26 @@ _STDERR_9001 = (
     "couldn't initialize a new proton drive instance: 422 POST "
     "https://mail.proton.me/api/auth/v4: For security reasons, please complete "
     "CAPTCHA. (Code=9001, Status=422)"
+)
+# Path atual (2026-05-24): /auth/v4/... — Proton mudou sem aviso.
+_STDERR_8002_NEW_PATH = (
+    'CRITICAL: Failed to create file system for "proton:Sync/dev/projects": '
+    "422 POST https://drive-api.proton.me/auth/v4/2fa: Incorrect login credentials. "
+    "(Code=8002, Status=422)"
+)
+_STDERR_10013 = (
+    "Bisync critical error: march failed with 5 error(s): first error: failed to "
+    "refresh auth: failed to refresh auth, de-auth: 400 POST "
+    "https://drive-api.proton.me/auth/v4/refresh: Invalid refresh token "
+    "(Code=10013, Status=400)"
+)
+_STDERR_2028 = (
+    "Failed to mkdir: couldn't create directory: 422 POST "
+    "https://i.proton.me/auth/v4: Our systems detected unusual activity targeting "
+    "your account. To protect you from potential compromise, we have temporarily "
+    "limited access to it. If this persists or you believe this is in error, "
+    "please contact us at https://proton.me/support/appeal-abuse "
+    "(Code=2028, Status=422)"
 )
 
 
@@ -371,19 +392,85 @@ def test_classify_captcha_required_9001():
     assert err is not None
     assert err.kind == "captcha_required"
     assert err.code == 9001
+    assert "Code=9001" in err.stderr_tail
+
+
+def test_classify_refresh_token_invalid_10013():
+    # Caso real do incidente 2026-05-24 16:58 — antes da extensão do classificador,
+    # este par retornava None e o daemon entrava em loop frenético sem pause.
+    err = _classify_rclone_stderr(_STDERR_10013)
+    assert err is not None
+    assert err.kind == "refresh_token_invalid"
+    assert err.code == 10013
+    assert "Code=10013" in err.stderr_tail
+
+
+def test_classify_rate_limited_2028():
+    # Caso real do incidente 2026-05-24 17:01 — CAPTCHA gate / suspect activity.
+    err = _classify_rclone_stderr(_STDERR_2028)
+    assert err is not None
+    assert err.kind == "rate_limited"
+    assert err.code == 2028
+    assert "appeal-abuse" in err.stderr_tail
+
+
+def test_classify_endpoint_without_api_prefix():
+    # Bug latente revelado em 2026-05-24: Proton mudou de /api/auth/v4 para /auth/v4
+    # sem aviso. Antes da correção do endpoint matcher, mesmo Code=8002 escapava.
+    err = _classify_rclone_stderr(_STDERR_8002_NEW_PATH)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
+    assert err.code == 8002
+
+
+def test_classify_returns_none_for_unknown_code_status_pair():
+    # Substituto da invariante negativa perdida ao inverter
+    # test_classify_returns_none_for_other_status_code: par fora de _AUTH_CODES
+    # deve retornar None mesmo em endpoint de auth válido.
+    stderr = "POST https://drive-api.proton.me/auth/v4 (Code=9999, Status=422)"
+    assert _classify_rclone_stderr(stderr) is None
+
+
+def test_classify_robust_to_noisy_pairs_in_stderr():
+    # Validação direta da escolha do regex composto sobre genérico + lookup:
+    # par ruidoso antes do par alvo no stderr não deve silenciar o classificador.
+    stderr = (
+        "socket: connection reset (Code=9999, Status=500); "
+        "auth retry: https://drive-api.proton.me/auth/v4 (Code=8002, Status=422)"
+    )
+    err = _classify_rclone_stderr(stderr)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
+    assert err.code == 8002
+
+
+def test_classify_picks_first_known_pair_when_multiple_present():
+    # Documenta first-match wins quando ≥2 pares alvo aparecem no mesmo stderr.
+    # Regressão se alguém trocar `re.search` por `re.findall + last`.
+    stderr = (
+        "https://drive-api.proton.me/auth/v4 (Code=8002, Status=422); "
+        "retry: (Code=10013, Status=400)"
+    )
+    err = _classify_rclone_stderr(stderr)
+    assert err is not None
+    assert err.code == 8002
+
+
+def test_classify_endpoint_and_pair_in_disjoint_contexts():
+    # Design: classificador é permissivo — endpoint e par alvo validados por
+    # `re.search` independentes; rclone não emite stderr ambíguo na prática,
+    # então adjacência não é exigida. Teste documenta a invariante via assert.
+    stderr = (
+        "GET https://drive-api.proton.me/auth/v4/info: ok. "
+        "Later error from /drive/v2/list (Code=8002, Status=422)"
+    )
+    err = _classify_rclone_stderr(stderr)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
 
 
 def test_classify_returns_none_for_non_auth_error():
     assert _classify_rclone_stderr("rclone: directory not found") is None
-
-
-def test_classify_returns_none_for_other_status_code():
-    # Code=10013 / Status=400 no /refresh — não é dos códigos alvo.
-    stderr = (
-        "POST https://mail.proton.me/api/auth/v4/refresh: Invalid refresh token "
-        "(Code=10013, Status=400)"
-    )
-    assert _classify_rclone_stderr(stderr) is None
 
 
 def test_classify_returns_none_without_full_anchor():
@@ -392,7 +479,7 @@ def test_classify_returns_none_without_full_anchor():
 
 
 def test_classify_returns_none_without_auth_endpoint():
-    # Códigos batem mas o endpoint não é /api/auth/v4 — descarta.
+    # Códigos batem mas o path não contém /auth/v4 — descarta.
     stderr = "POST https://api.proton.me/drive/v2/foo (Code=8002, Status=422)"
     assert _classify_rclone_stderr(stderr) is None
 
@@ -401,12 +488,23 @@ def test_classify_returns_none_without_auth_endpoint():
 # _run levanta AuthDegradedError quando stderr matcha
 # ---------------------------------------------------------------------------
 
-async def test_run_raises_auth_degraded_on_matching_stderr(monkeypatch):
+@pytest.mark.parametrize(
+    "stderr_sample,expected_code,expected_kind",
+    [
+        (_STDERR_8002, 8002, "invalid_credentials"),
+        (_STDERR_9001, 9001, "captcha_required"),
+        (_STDERR_10013, 10013, "refresh_token_invalid"),
+        (_STDERR_2028, 2028, "rate_limited"),
+    ],
+)
+async def test_run_raises_auth_degraded_on_matching_stderr(
+    monkeypatch, stderr_sample, expected_code, expected_kind
+):
     class _FakeProc:
         returncode = 1
 
         async def communicate(self):
-            return (b"", _STDERR_8002.encode("utf-8"))
+            return (b"", stderr_sample.encode("utf-8"))
 
     async def fake_exec(*args, **kwargs):
         return _FakeProc()
@@ -416,7 +514,8 @@ async def test_run_raises_auth_degraded_on_matching_stderr(monkeypatch):
     with pytest.raises(AuthDegradedError) as excinfo:
         await _run(["rclone", "mkdir", "proton:Sync/dev/projects"])
 
-    assert excinfo.value.code == 8002
+    assert excinfo.value.code == expected_code
+    assert excinfo.value.kind == expected_kind
 
 
 async def test_run_does_not_raise_on_non_auth_failure(monkeypatch):
