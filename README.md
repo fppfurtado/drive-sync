@@ -129,7 +129,8 @@ Tudo no `config.yaml`:
 - **watcher**: tamanho da fila, `max_concurrent_jobs`, sync periódica de
   rede de segurança, atraso inicial, `folder_staleness_threshold_seconds`
   (pasta sem sucesso há mais que este limite vira degraded; per-folder, sem
-  pausa global — ADR-005; opt-out via 0; exige `periodic_full_sync_seconds > 0`).
+  pausa global — ADR-005; tempo conta só atividade do daemon, suspend-aware
+  via ADR-007; opt-out via 0; exige `periodic_full_sync_seconds > 0`).
 - **dedupe**: ligar/desligar a deduplicação de subpastas.
 - **logging**: nível, arquivo, `max_bytes`, `backup_count`, eco no console.
 
