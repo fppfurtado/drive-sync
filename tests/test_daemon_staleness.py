@@ -59,8 +59,11 @@ def _build_daemon(folders: list[FolderConfig], threshold: int = 43200) -> SyncDa
 
 def test_stale_folder_enters_degraded(monkeypatch):
     daemon = _build_daemon([_folder("alpha")])
+    # Espelhar os dois dicts (invariante mantida em produção pelo _process_folder).
     daemon._last_successful_sync_at["alpha"] = 1_000.0
+    daemon._last_successful_sync_at_mono["alpha"] = 1_000.0
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0 + 43_201)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0 + 43_201)
 
     daemon._check_folder_staleness()
 
@@ -71,12 +74,15 @@ def test_stale_folder_enters_degraded(monkeypatch):
     daemon._notifier.send_status.assert_called_once()
 
 
-def test_never_synced_folder_uses_daemon_start_time_baseline(monkeypatch):
+def test_never_synced_folder_uses_daemon_start_baselines(monkeypatch):
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0)
     daemon = _build_daemon([_folder("alpha")])
     assert daemon._daemon_start_time == 1_000.0
+    assert daemon._daemon_start_monotonic == 1_000.0
 
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0 + 43_201)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0 + 43_201)
     daemon._check_folder_staleness()
 
     assert "alpha" in daemon._degraded_folders
@@ -84,9 +90,11 @@ def test_never_synced_folder_uses_daemon_start_time_baseline(monkeypatch):
 
 def test_fresh_daemon_does_not_mark_folders_degraded(monkeypatch):
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0)
     daemon = _build_daemon([_folder("alpha"), _folder("beta")])
 
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_500.0)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_500.0)
     daemon._check_folder_staleness()
 
     assert daemon._degraded_folders == {}
@@ -96,7 +104,9 @@ def test_fresh_daemon_does_not_mark_folders_degraded(monkeypatch):
 def test_check_is_idempotent(monkeypatch):
     daemon = _build_daemon([_folder("alpha")])
     daemon._last_successful_sync_at["alpha"] = 1_000.0
+    daemon._last_successful_sync_at_mono["alpha"] = 1_000.0
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0 + 43_201)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0 + 43_201)
 
     daemon._check_folder_staleness()
     daemon._check_folder_staleness()
@@ -107,6 +117,7 @@ def test_check_is_idempotent(monkeypatch):
 def test_disabled_folder_is_skipped(monkeypatch):
     daemon = _build_daemon([_folder("alpha", enabled=False)])
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1e9)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1e9)
 
     daemon._check_folder_staleness()
 
@@ -117,11 +128,74 @@ def test_disabled_folder_is_skipped(monkeypatch):
 def test_threshold_zero_is_noop(monkeypatch):
     daemon = _build_daemon([_folder("alpha")], threshold=0)
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1e9)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1e9)
 
     daemon._check_folder_staleness()
 
     assert daemon._degraded_folders == {}
     daemon._notifier.folder_degraded.assert_not_called()
+
+
+# Invariante novo introduzido por ADR-007: monotonic congela com o processo
+# sob suspend; wall-clock avança normalmente. Gate em monotonic evita
+# falso-positivo de degraded quando o daemon não teve oportunidade de tentar.
+
+def test_check_does_not_mark_degraded_under_suspend_gap(monkeypatch):
+    # Setup: folder com sucesso há "1000s" em ambos os clocks.
+    daemon = _build_daemon([_folder("alpha")])
+    daemon._last_successful_sync_at["alpha"] = 1_000.0
+    daemon._last_successful_sync_at_mono["alpha"] = 1_000.0
+
+    # Simula suspend de 13h (wall avança 46_800s = 13h) mas daemon estava
+    # congelado quase o tempo todo (monotonic avança só 10s).
+    monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0 + 46_800)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0 + 10)
+
+    daemon._check_folder_staleness()
+
+    # Gate é monotonic — 10s < threshold (43_200s = 12h) → NÃO marca degraded.
+    assert "alpha" not in daemon._degraded_folders
+    daemon._notifier.folder_degraded.assert_not_called()
+
+
+def test_check_reason_uses_min_wall_mono(monkeypatch):
+    # Setup: cenário onde ambos os clocks avançaram > threshold, mas com gap
+    # de cadência do periodic — wall conta sleep (20.5h), monotonic conta
+    # só tempo ativo (12.1h). Reason deve reportar o menor.
+    daemon = _build_daemon([_folder("alpha")])
+    daemon._last_successful_sync_at["alpha"] = 1_000.0
+    daemon._last_successful_sync_at_mono["alpha"] = 1_000.0
+
+    elapsed_wall = 20.5 * 3600  # 73_800s
+    elapsed_mono = 12.1 * 3600  # 43_560s (> threshold de 43_200s)
+    monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0 + elapsed_wall)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0 + elapsed_mono)
+
+    daemon._check_folder_staleness()
+
+    assert "alpha" in daemon._degraded_folders
+    reason = daemon._degraded_folders["alpha"]
+    # min(20.5, 12.1) = 12.1 → reason reporta o menor.
+    assert reason == "sem sucesso há 12.1h"
+
+
+def test_check_reason_uses_min_wall_mono_when_wall_smaller(monkeypatch):
+    # Cenário oposto: wall < mono (plausível se NTP corrigiu wall-clock para
+    # trás durante a sessão, ou `date` manual). min(...) ainda escolhe o menor —
+    # protege contra implementação que devolvesse `elapsed_mono` sempre.
+    daemon = _build_daemon([_folder("alpha")])
+    daemon._last_successful_sync_at["alpha"] = 1_000.0
+    daemon._last_successful_sync_at_mono["alpha"] = 1_000.0
+
+    elapsed_wall = 12.5 * 3600  # 45_000s
+    elapsed_mono = 13.0 * 3600  # 46_800s (ambos acima do threshold 12h)
+    monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 1_000.0 + elapsed_wall)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 1_000.0 + elapsed_mono)
+
+    daemon._check_folder_staleness()
+
+    assert "alpha" in daemon._degraded_folders
+    assert daemon._degraded_folders["alpha"] == "sem sucesso há 12.5h"
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +209,20 @@ def test_successful_sync_clears_degraded_silently(monkeypatch):
     daemon.engine = MagicMock()
     daemon.engine.bisync_folder = AsyncMock(return_value=True)
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 2_000.0)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 2_000.0)
 
     result = asyncio.run(daemon._process_folder(folder))
 
     assert result is True
     assert "alpha" not in daemon._degraded_folders
+    # Invariante de espelhamento (ADR-007): _process_folder atualiza ambos os
+    # dicts com o mesmo conjunto de chaves — se está num, está no outro.
     assert daemon._last_successful_sync_at["alpha"] == 2_000.0
+    assert daemon._last_successful_sync_at_mono["alpha"] == 2_000.0
+    assert (
+        set(daemon._last_successful_sync_at.keys())
+        == set(daemon._last_successful_sync_at_mono.keys())
+    )
     # Recuperação re-emite STATUS agregada (limpa) mas NÃO chama folder_degraded.
     daemon._notifier.send_status.assert_called_once()
     daemon._notifier.folder_degraded.assert_not_called()
@@ -152,11 +234,13 @@ def test_failed_sync_does_not_update_last_successful(monkeypatch):
     daemon.engine = MagicMock()
     daemon.engine.bisync_folder = AsyncMock(return_value=False)
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 2_000.0)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 2_000.0)
 
     result = asyncio.run(daemon._process_folder(folder))
 
     assert result is False
     assert "alpha" not in daemon._last_successful_sync_at
+    assert "alpha" not in daemon._last_successful_sync_at_mono
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +336,7 @@ def test_recovery_recomputes_status_with_remaining_folders(monkeypatch):
     daemon.engine = MagicMock()
     daemon.engine.bisync_folder = AsyncMock(return_value=True)
     monkeypatch.setattr("drive_sync.daemon.time.time", lambda: 2_000.0)
+    monkeypatch.setattr("drive_sync.daemon.time.monotonic", lambda: 2_000.0)
 
     asyncio.run(daemon._process_folder(folder_alpha))
 
