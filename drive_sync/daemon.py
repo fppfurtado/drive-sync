@@ -45,10 +45,15 @@ class SyncDaemon:
         self._last_sync_at: dict[str, float] = {}
         self._cooldown_scheduled: set[str] = set()
         self._cooldown_tasks: set[asyncio.Task[None]] = set()
-        # Staleness per-folder (ADR-005): wall-clock.
+        # Staleness per-folder (ADR-005 + ADR-007): dual-clock.
+        # Wall-clock alimenta o reason ("sem sucesso há X.Xh"); monotonic gate
+        # do _check_folder_staleness (suspend-aware — relógio congela com o
+        # processo, evita falso-positivo de degraded após suspend > threshold).
         self._last_successful_sync_at: dict[str, float] = {}
+        self._last_successful_sync_at_mono: dict[str, float] = {}
         self._degraded_folders: dict[str, str] = {}
         self._daemon_start_time: float = time.time()
+        self._daemon_start_monotonic: float = time.monotonic()
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
 
@@ -88,6 +93,7 @@ class SyncDaemon:
 
         if success:
             self._last_successful_sync_at[folder.name] = time.time()
+            self._last_successful_sync_at_mono[folder.name] = time.monotonic()
             was_degraded = self._degraded_folders.pop(folder.name, None) is not None
             if was_degraded:
                 self._notifier.send_status(self._compose_status_payload())
@@ -250,19 +256,28 @@ class SyncDaemon:
         return "STATUS="
 
     def _check_folder_staleness(self) -> None:
-        """Marca como degraded pastas sem sucesso há > threshold (ADR-005)."""
+        """Marca como degraded pastas sem sucesso há > threshold (ADR-005 + ADR-007).
+
+        Gate: monotonic (suspend congela com o processo); reason: min(wall, mono)
+        — wall dá "horas reais", monotonic caps gap de cadência do periodic.
+        """
         threshold = self.cfg.watcher.folder_staleness_threshold_seconds
         if threshold <= 0:
             return
-        now = time.time()
+        now_wall = time.time()
+        now_mono = time.monotonic()
         changed = False
         for f in self.cfg.folders:
             if not f.enabled or f.name in self._degraded_folders:
                 continue
-            last = self._last_successful_sync_at.get(f.name, self._daemon_start_time)
-            elapsed = now - last
-            if elapsed > threshold:
-                reason = f"sem sucesso há {elapsed / 3600:.1f}h"
+            last_mono = self._last_successful_sync_at_mono.get(
+                f.name, self._daemon_start_monotonic
+            )
+            elapsed_mono = now_mono - last_mono
+            if elapsed_mono > threshold:
+                last_wall = self._last_successful_sync_at.get(f.name, self._daemon_start_time)
+                elapsed_wall = now_wall - last_wall
+                reason = f"sem sucesso há {min(elapsed_wall, elapsed_mono) / 3600:.1f}h"
                 self._degraded_folders[f.name] = reason
                 self._notifier.folder_degraded(f.name, reason)
                 changed = True
