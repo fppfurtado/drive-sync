@@ -83,8 +83,8 @@ $ drive-sync --status
 
 Folder                          Initialized  Last sync         Remote
 ------------------------------  -----------  ----------------  ------------------------
-/storage/3. Resources/Projects  yes          2026-05-10 06:48  proton:Sync/dev/projects
-~/Videos                        yes          2026-05-09 11:42  proton:Sync/videos
+/storage/dev/projects           yes          2026-05-10 06:48  proton:Sync/dev/projects
+/storage/videos                 yes          2026-05-09 11:42  proton:Sync/videos
 ```
 
 ---
