@@ -12,14 +12,11 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 say()  { printf '\e[1;34m==>\e[0m %s\n' "$*"; }
 warn() { printf '\e[1;33m[!] %s\e[0m\n' "$*"; }
 
-# 1) Garante pipx no PATH (Fedora coloca em ~/.local/bin)
-pipx ensurepath >/dev/null
-
-# 2) Instala o pacote no user-site via pipx
+# 1) Instala o pacote no user-site via pipx
 say "Instalando o pacote drive-sync..."
 pipx install --force "$PROJECT_DIR"
 
-# 3) Cria o config se não existir
+# 2) Cria o config se não existir
 mkdir -p "$CONFIG_HOME"
 if [[ ! -f "$CONFIG_HOME/config.yaml" ]]; then
   cp "$PROJECT_DIR/config/config.yaml.example" "$CONFIG_HOME/config.yaml"
@@ -29,19 +26,19 @@ else
   say "Config já existe em $CONFIG_HOME/config.yaml — preservado."
 fi
 
-# 4) Instala a unit do systemd --user
+# 3) Instala a unit do systemd --user
 say "Instalando unit systemd --user..."
 mkdir -p "$SYSTEMD_USER_DIR"
 cp "$PROJECT_DIR/systemd/drive-sync.service" "$SYSTEMD_USER_DIR/"
 systemctl --user daemon-reload
 
-# 5) Habilita lingering para o serviço subir antes do login (boot do SO)
+# 4) Habilita lingering para o serviço subir antes do login (boot do SO)
 if ! loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
   say "Habilitando lingering para que o serviço suba com o boot..."
   sudo loginctl enable-linger "$USER"
 fi
 
-# 6) Habilita o serviço (sem iniciar — pede para o usuário configurar primeiro)
+# 5) Habilita o serviço (sem iniciar — pede para o usuário configurar primeiro)
 systemctl --user enable drive-sync.service >/dev/null
 
 cat <<EOF
