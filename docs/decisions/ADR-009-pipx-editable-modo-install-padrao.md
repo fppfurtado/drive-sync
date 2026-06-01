@@ -65,10 +65,10 @@ Razões:
 Operador no host atual roda UMA VEZ, após `git pull` do commit que aceita ADR-009:
 
 ```bash
-pipx reinstall drive-sync
+bash scripts/install.sh
 ```
 
-Confirmação: `pipx list` deve mostrar `drive-sync` sem warning `symlink missing or pointing to unexpected location`; `which drive-sync` deve retornar symlink (não arquivo regular). Hosts subsequentes herdam o modo via `scripts/install.sh` fresh (sem passo manual). Bloco 3 do plano consumidor replica esta instrução em CLAUDE.md §Installation para descobrabilidade.
+`scripts/install.sh` é o entry-point idempotente — mesmo caminho do fresh install, com `pipx install -e --force` aplicando editable retroativamente. **Não usar `pipx reinstall drive-sync`**: reusa a spec original (snapshot pré-editable, sem `-e`), não converte o modo. Confirmação: `pipx list` deve mostrar `drive-sync` sem warning `symlink missing or pointing to unexpected location`; `which drive-sync` deve retornar symlink (não arquivo regular). Hosts subsequentes herdam o modo via `scripts/install.sh` fresh (sem passo manual). CLAUDE.md §Installation replica esta instrução para descobrabilidade.
 
 ## Alternativas consideradas
 
