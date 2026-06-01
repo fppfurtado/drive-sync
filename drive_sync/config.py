@@ -168,7 +168,12 @@ class SubpathOverride:
 
 @dataclass
 class RepoOverride:
-    """Override por repo descoberto (ADR-008). repo_subpath casa repo escaneado."""
+    """Override por repo descoberto (ADR-008). repo_subpath casa repo escaneado.
+
+    repo_subpath é relativo ao folder.local_path e nunca vazio — override do
+    repo na raiz do folder (quando folder.local_path é ele próprio um repo git)
+    não passa por aqui; use folder.git_handling diretamente.
+    """
 
     repo_subpath: str
     mode: str

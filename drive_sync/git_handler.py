@@ -29,15 +29,141 @@ import logging
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from .config import GitConfig
+from .config import FolderConfig, GitConfig
 
 log = logging.getLogger(__name__)
 
 # Refs isoladas usadas para o snapshot do worktree.
 SNAPSHOT_REF = "refs/drive-sync/snapshot"
 HEAD_MARKER_REF = "refs/drive-sync/head-at-snapshot"
+
+
+# ---------------------------------------------------------------------------
+# Classificação de repos para dispatch (ADR-008)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RepoClassification:
+    """Resultado da classificação de um repo descoberto sob um folder em `auto`."""
+
+    repo_path: Path
+    repo_subpath: str  # relativo ao folder.local_path
+    mode: Literal["skip", "bundle"]
+    reason: Literal["no_remote", "has_remote", "override"]
+    remote_url: str | None  # primeira URL retornada por `git remote -v`, None quando vazio
+
+
+def _get_remote_url(repo_path: Path) -> str | None:
+    """Retorna a primeira URL do output de `git remote -v`, ou None se vazio.
+
+    Output típico: `origin\\tgit@github.com:user/repo.git (fetch)\\norigin\\t...(push)\\n`.
+    Stderr não é necessário (sem remote → exit 0 + stdout vazio).
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "remote", "-v"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        # Falha do git (não-repo, .git corrupto, etc.) — tratado como sem remote.
+        log.debug("git remote -v falhou em %s: %s", repo_path, result.stderr.strip())
+        return None
+    first_line = result.stdout.strip().split("\n", 1)[0].strip()
+    if not first_line:
+        return None
+    # Forma fixa: `<name>\t<url> (fetch|push)` — segundo campo é a URL.
+    return first_line.split(None, 2)[1]
+
+
+def classify_repos(
+    folder: FolderConfig, git_cfg: GitConfig
+) -> list[RepoClassification]:
+    """Classifica repos descobertos sob folder.local_path conforme ADR-008.
+
+    - `git remote -v` vazio → mode=bundle, reason=no_remote
+    - com remote → mode=skip, reason=has_remote (URL capturada pra log)
+    - match em folder.repo_overrides → mode=override.mode, reason=override (precedência total)
+    - repo sem HEAD: classifica normal (bundle/skip per remote); create_bundle no-op silente
+    - `.git` arquivo (worktree/submodule): delega ao superproject naturalmente
+
+    Não chama Notifier nem persiste estado — caller (daemon) gerencia flip detection.
+    """
+    repos: list[Path] = []
+    if git_cfg.recursive_detection:
+        repos = find_git_repos(folder.local_path, git_cfg.max_recursion_depth)
+    elif is_git_repo(folder.local_path):
+        repos = [folder.local_path]
+
+    override_map = {o.repo_subpath: o.mode for o in folder.repo_overrides}
+
+    classifications: list[RepoClassification] = []
+    for repo in repos:
+        rel = repo.relative_to(folder.local_path) if repo != folder.local_path else Path(".")
+        repo_subpath = str(rel) if rel != Path(".") else ""
+
+        if repo_subpath in override_map:
+            mode = override_map[repo_subpath]
+            remote_url = _get_remote_url(repo)
+            log.info(
+                "[%s] [REPO_%s] %s (override)",
+                folder.name, mode.upper(), repo_subpath or "<root>",
+            )
+            classifications.append(RepoClassification(
+                repo_path=repo, repo_subpath=repo_subpath,
+                mode=mode, reason="override", remote_url=remote_url,
+            ))
+            continue
+
+        remote_url = _get_remote_url(repo)
+        if remote_url is None:
+            log.info(
+                "[%s] [REPO_BUNDLE] %s (no_remote)",
+                folder.name, repo_subpath or "<root>",
+            )
+            classifications.append(RepoClassification(
+                repo_path=repo, repo_subpath=repo_subpath,
+                mode="bundle", reason="no_remote", remote_url=None,
+            ))
+        else:
+            log.info(
+                "[%s] [REPO_SKIP] %s (has_remote: %s)",
+                folder.name, repo_subpath or "<root>", remote_url,
+            )
+            classifications.append(RepoClassification(
+                repo_path=repo, repo_subpath=repo_subpath,
+                mode="skip", reason="has_remote", remote_url=remote_url,
+            ))
+
+    return classifications
+
+
+def detect_repo_mode_flips(
+    folder_name: str,
+    prev_state: dict[str, str],
+    current: list[RepoClassification],
+) -> list[tuple[str, str, str]]:
+    """Compara classificação atual com prev_state; retorna eventos como (subpath, old, new).
+
+    prev_state vazio (primeiro ciclo pós-restart) → retorna [] (silencioso).
+    Log [REPO_MODE_FLIP] em WARNING level — flip é evento "olhe aqui" alinhado com
+    a heurística de grep do operador (`journalctl --grep REPO_MODE_FLIP` casa
+    com outros eventos WARNING como [FOLDER_DEGRADED] de ADR-005). Caller (daemon)
+    dispara Notifier.
+    """
+    if not prev_state:
+        return []
+    flips: list[tuple[str, str, str]] = []
+    for c in current:
+        old_mode = prev_state.get(c.repo_subpath)
+        if old_mode is not None and old_mode != c.mode:
+            log.warning(
+                "[%s] [REPO_MODE_FLIP] %s: %s→%s",
+                folder_name, c.repo_subpath or "<root>", old_mode, c.mode,
+            )
+            flips.append((c.repo_subpath, old_mode, c.mode))
+    return flips
 
 
 def is_git_repo(path: Path) -> bool:
