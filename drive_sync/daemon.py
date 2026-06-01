@@ -73,22 +73,23 @@ class SyncDaemon:
     # Roteamento de uma tarefa: três modos possíveis.
     # ------------------------------------------------------------------
     def _is_bundle_flow(self, folder: FolderConfig) -> bool:
-        """Só entra no fluxo de bundle se o usuário pediu explicitamente.
+        """Só entra no fluxo de bundle quando explícito no folder-level.
 
-        Em `bisync` (padrão) e `off`, o worktree inteiro é sincronizado via
-        rclone bisync — apenas com diferentes níveis de exclude automático.
+        Bloco 3 (ADR-008) vai estender para tratar `auto` por repo descoberto;
+        hoje (Bloco 1) o dispatch ainda é folder-level: `bundle` → bundle flow;
+        `auto|skip|plain` → bisync.
         """
-        return folder.git_mode == "bundle"
+        return folder.git_handling == "bundle"
 
     async def _process_folder(self, folder: FolderConfig) -> bool:
         """Processa uma tarefa de sincronização, fim a fim. Retorna True em sucesso."""
-        log.info("[%s] Iniciando job (modo=%s).", folder.name, folder.git_mode)
+        log.info("[%s] Iniciando job (modo=%s).", folder.name, folder.git_handling)
 
         if self._is_bundle_flow(folder):
             await self._sync_git_folder(folder)
             success = True
         else:
-            # Modos "bisync" e "off" caem aqui — diferença está só nos excludes.
+            # `auto`, `skip` e `plain` caem aqui — Bloco 3 vai diferenciar.
             success = await self.engine.bisync_folder(folder)
 
         if success:

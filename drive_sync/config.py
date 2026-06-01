@@ -11,7 +11,11 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-_VALID_GIT_MODES = ("off", "bisync", "bundle")
+_VALID_GIT_HANDLING = ("auto", "skip", "bundle", "plain")
+_VALID_REPO_OVERRIDE_MODES = ("skip", "bundle")
+_VALID_SUBPATH_OVERRIDE_HANDLING = ("skip", "bundle", "plain")
+_LEGACY_GIT_MODE_VALUES = ("bisync", "bundle", "off")
+_PLAYBOOK_PATH = "docs/operations/playbook-flip-git-handling.md"
 
 
 # ---------------------------------------------------------------------------
@@ -22,34 +26,51 @@ def _expand(p: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(p))).resolve()
 
 
+def _normalize_subpath(parent_name: str, raw_subpath: str, field_label: str) -> str:
+    """Valida shape de subpath; retorna versão normalizada (sem leading/trailing /)."""
+    subpath = raw_subpath.strip("/")
+    if not subpath:
+        raise ValueError(
+            f"{field_label} em {parent_name!r}: subpath vazio"
+        )
+    if raw_subpath.startswith("/"):
+        raise ValueError(
+            f"{field_label} em {parent_name!r}: subpath {raw_subpath!r} "
+            f"não pode ser absoluto"
+        )
+    if ".." in subpath.split("/"):
+        raise ValueError(
+            f"{field_label} em {parent_name!r}: subpath {raw_subpath!r} "
+            f"não pode conter '..'"
+        )
+    return subpath
+
+
 def _parse_subpath_overrides(
     parent_name: str, raw: list[dict[str, Any]]
 ) -> list["SubpathOverride"]:
-    """Valida e converte raw YAML de subpath_overrides (ADR-006)."""
+    """Valida e converte raw YAML de subpath_overrides (ADR-006 + ADR-008)."""
     overrides: list[SubpathOverride] = []
     seen_subpaths: set[str] = set()
     for item in raw:
+        if "git_mode" in item:
+            legacy_value = item["git_mode"]
+            raise ValueError(
+                f"subpath_overrides em {parent_name!r}: chave 'git_mode' removida "
+                f"(ADR-008) — use 'git_handling' "
+                f"(valores: {', '.join(repr(v) for v in _VALID_SUBPATH_OVERRIDE_HANDLING)}). "
+                f"Valor legado {legacy_value!r} mapeia para "
+                f"{_legacy_subpath_migration_hint(legacy_value)!r}. "
+                f"Veja {_PLAYBOOK_PATH}."
+            )
         raw_subpath = item.get("subpath") or ""
-        subpath = raw_subpath.strip("/")
-        git_mode = item.get("git_mode")
-        if not subpath:
+        subpath = _normalize_subpath(parent_name, raw_subpath, "subpath_overrides")
+        git_handling = item.get("git_handling")
+        if git_handling not in _VALID_SUBPATH_OVERRIDE_HANDLING:
             raise ValueError(
-                f"subpath_overrides em {parent_name!r}: subpath vazio"
-            )
-        if raw_subpath.startswith("/"):
-            raise ValueError(
-                f"subpath_overrides em {parent_name!r}: subpath {raw_subpath!r} "
-                f"não pode ser absoluto"
-            )
-        if ".." in subpath.split("/"):
-            raise ValueError(
-                f"subpath_overrides em {parent_name!r}: subpath {raw_subpath!r} "
-                f"não pode conter '..'"
-            )
-        if git_mode not in _VALID_GIT_MODES:
-            raise ValueError(
-                f"subpath_overrides em {parent_name!r}: git_mode {git_mode!r} "
-                f"inválido para subpath {raw_subpath!r} (use 'off', 'bisync' ou 'bundle')"
+                f"subpath_overrides em {parent_name!r}: git_handling {git_handling!r} "
+                f"inválido para subpath {raw_subpath!r} "
+                f"(use {', '.join(repr(v) for v in _VALID_SUBPATH_OVERRIDE_HANDLING)})"
             )
         if subpath in seen_subpaths:
             raise ValueError(
@@ -63,8 +84,50 @@ def _parse_subpath_overrides(
                     f"está aninhado com {prior!r} — sobreposição não permitida"
                 )
         seen_subpaths.add(subpath)
-        overrides.append(SubpathOverride(subpath=subpath, git_mode=git_mode))
+        overrides.append(SubpathOverride(subpath=subpath, git_handling=git_handling))
     return overrides
+
+
+def _parse_repo_overrides(
+    parent_name: str, raw: list[dict[str, Any]]
+) -> list["RepoOverride"]:
+    """Valida e converte raw YAML de repo_overrides (ADR-008)."""
+    overrides: list[RepoOverride] = []
+    seen_subpaths: set[str] = set()
+    for item in raw:
+        raw_subpath = item.get("repo_subpath") or ""
+        subpath = _normalize_subpath(parent_name, raw_subpath, "repo_overrides")
+        mode = item.get("mode")
+        if mode not in _VALID_REPO_OVERRIDE_MODES:
+            raise ValueError(
+                f"repo_overrides em {parent_name!r}: mode {mode!r} "
+                f"inválido para repo_subpath {raw_subpath!r} "
+                f"(use {', '.join(repr(v) for v in _VALID_REPO_OVERRIDE_MODES)})"
+            )
+        if subpath in seen_subpaths:
+            raise ValueError(
+                f"repo_overrides em {parent_name!r}: repo_subpath {raw_subpath!r} "
+                f"duplicado"
+            )
+        seen_subpaths.add(subpath)
+        overrides.append(RepoOverride(repo_subpath=subpath, mode=mode))
+    return overrides
+
+
+def _validate_repo_subpath_overlap(
+    parent_name: str,
+    repo_overrides: list["RepoOverride"],
+    subpath_overrides: list["SubpathOverride"],
+) -> None:
+    """ADR-008: rejeita sobreposição entre repo_overrides e subpath_overrides."""
+    repo_paths = {o.repo_subpath for o in repo_overrides}
+    for sp in subpath_overrides:
+        if sp.subpath in repo_paths:
+            raise ValueError(
+                f"{parent_name!r}: subpath {sp.subpath!r} aparece em ambos "
+                f"repo_overrides e subpath_overrides — sobreposição não permitida "
+                f"(ADR-008 §Coexistência). Mantenha em apenas um."
+            )
 
 
 def _expand_synthetic_folder(
@@ -77,12 +140,13 @@ def _expand_synthetic_folder(
         local_path=parent.local_path / override.subpath,
         remote_subpath=f"{parent.remote_subpath}/{override.subpath}".strip("/"),
         enabled=parent.enabled,
-        git_mode=override.git_mode,
+        git_handling=override.git_handling,
         exclude=list(parent.exclude),
         auto_exclude=parent.auto_exclude,
         debounce_seconds=parent.debounce_seconds,
         cooldown_seconds=parent.cooldown_seconds,
         subpath_overrides=[],
+        repo_overrides=[],
         fs_key=synthetic_name.replace("/", "-"),
     )
 
@@ -92,10 +156,22 @@ def _expand_synthetic_folder(
 # ---------------------------------------------------------------------------
 @dataclass
 class SubpathOverride:
-    """Override de git_mode para um subpath dentro de um folder (ADR-006)."""
+    """Override de git_handling para um subpath dentro de um folder (ADR-006 + ADR-008).
+
+    git_handling aceita apenas 'skip', 'bundle' ou 'plain' — 'auto' não aplica em
+    subpath (auto é varredura do folder; o operador já apontou o caminho exato).
+    """
 
     subpath: str
-    git_mode: str
+    git_handling: str
+
+
+@dataclass
+class RepoOverride:
+    """Override por repo descoberto (ADR-008). repo_subpath casa repo escaneado."""
+
+    repo_subpath: str
+    mode: str
 
 
 @dataclass
@@ -104,17 +180,19 @@ class FolderConfig:
     local_path: Path
     remote_subpath: str
     enabled: bool = True
-    # "off"     → bisync puro, sem nenhum tratamento especial
-    # "bisync"  → bisync com excludes automáticos de artefatos de build
-    # "bundle"  → empacota com `git bundle` (só histórico commitado)
-    git_mode: str = "bisync"
+    # "auto"   → scan + git remote -v decide (vazio → bundle; com remote → skip)
+    # "skip"   → folder inteiro fora do sync
+    # "bundle" → empacota com `git bundle` (só histórico commitado)
+    # "plain"  → bisync puro, sem tratamento git (folders não-git)
+    git_handling: str = "auto"
     exclude: list[str] = field(default_factory=list)
-    # Se True (e git_mode != "bundle"), aplica os excludes do
+    # Se True (e git_handling != "bundle"), aplica os excludes do
     # exclude_presets.default_excludes_for_code() em adição aos do usuário.
     auto_exclude: bool = True
     debounce_seconds: int = 5
     cooldown_seconds: int = 0
     subpath_overrides: list[SubpathOverride] = field(default_factory=list)
+    repo_overrides: list[RepoOverride] = field(default_factory=list)
     fs_key: str = ""  # slug filesystem-safe; default vira `name` no __post_init__ — ADR-006
 
     def __post_init__(self) -> None:
@@ -216,11 +294,20 @@ def load_config(path: Path | None = None) -> AppConfig:
             raise ValueError(f"Nome de pasta duplicado em 'folders': {name!r}")
         seen_names.add(name)
 
-        git_mode = entry.get("git_mode", "bisync")
-        if git_mode not in _VALID_GIT_MODES:
+        if "git_mode" in entry:
+            legacy_value = entry["git_mode"]
             raise ValueError(
-                f"git_mode inválido em {name!r}: {git_mode!r} "
-                f"(use 'off', 'bisync' ou 'bundle')"
+                f"git_mode em {name!r}: chave removida (ADR-008) — use 'git_handling' "
+                f"(valores: {', '.join(repr(v) for v in _VALID_GIT_HANDLING)}). "
+                f"Valor legado {legacy_value!r} mapeia para "
+                f"{_legacy_migration_hint(legacy_value)!r}. Veja {_PLAYBOOK_PATH}."
+            )
+
+        git_handling = entry.get("git_handling", "auto")
+        if git_handling not in _VALID_GIT_HANDLING:
+            raise ValueError(
+                f"git_handling inválido em {name!r}: {git_handling!r} "
+                f"(use {', '.join(repr(v) for v in _VALID_GIT_HANDLING)})"
             )
 
         cooldown_seconds = int(entry.get("cooldown_seconds", 0))
@@ -233,17 +320,22 @@ def load_config(path: Path | None = None) -> AppConfig:
         overrides_raw = entry.get("subpath_overrides") or []
         overrides = _parse_subpath_overrides(name, overrides_raw)
 
+        repo_overrides_raw = entry.get("repo_overrides") or []
+        repo_overrides = _parse_repo_overrides(name, repo_overrides_raw)
+        _validate_repo_subpath_overlap(name, repo_overrides, overrides)
+
         parent = FolderConfig(
             name=name,
             local_path=_expand(entry["local_path"]),
             remote_subpath=entry["remote_subpath"].strip("/"),
             enabled=bool(entry.get("enabled", True)),
-            git_mode=git_mode,
+            git_handling=git_handling,
             exclude=list(entry.get("exclude", [])),
             auto_exclude=bool(entry.get("auto_exclude", True)),
             debounce_seconds=int(entry.get("debounce_seconds", 5)),
             cooldown_seconds=cooldown_seconds,
             subpath_overrides=overrides,
+            repo_overrides=repo_overrides,
         )
         folders.append(parent)
 
@@ -344,3 +436,15 @@ def load_config(path: Path | None = None) -> AppConfig:
         logging=logging_cfg,
         source_path=cfg_path,
     )
+
+
+def _legacy_migration_hint(legacy_value: Any) -> str:
+    """Retorna o git_handling equivalente para o git_mode legado, para mensagem de migração."""
+    mapping = {"bisync": "auto", "bundle": "bundle", "off": "plain"}
+    return mapping.get(legacy_value, "auto")
+
+
+def _legacy_subpath_migration_hint(legacy_value: Any) -> str:
+    """Mapping legado para subpath_overrides — 'bisync' não tem equivalente direto."""
+    mapping = {"bundle": "bundle", "off": "plain"}
+    return mapping.get(legacy_value, "<sem equivalente; bisync no subpath não é suportado>")
