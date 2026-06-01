@@ -54,6 +54,9 @@ class SyncDaemon:
         self._degraded_folders: dict[str, str] = {}
         self._daemon_start_time: float = time.time()
         self._daemon_start_monotonic: float = time.monotonic()
+        # Classify_repos state per folder (ADR-008): {folder_name: {repo_subpath: mode}}.
+        # Vazio no primeiro ciclo pós-restart → flip detection silente.
+        self._last_classification: dict[str, dict[str, str]] = {}
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
 
@@ -73,51 +76,95 @@ class SyncDaemon:
     # Roteamento de uma tarefa: três modos possíveis.
     # ------------------------------------------------------------------
     def _is_bundle_flow(self, folder: FolderConfig) -> bool:
-        """Só entra no fluxo de bundle se o usuário pediu explicitamente.
+        """Bundle flow folder-level (ADR-008). Modo `auto` despacha per-repo em _process_auto."""
+        return folder.git_handling == "bundle"
 
-        Em `bisync` (padrão) e `off`, o worktree inteiro é sincronizado via
-        rclone bisync — apenas com diferentes níveis de exclude automático.
-        """
-        return folder.git_mode == "bundle"
+    def _mark_success(self, folder: FolderConfig) -> None:
+        """Atualiza relógios duais + limpa degraded — invariante ADR-005/ADR-007."""
+        self._last_successful_sync_at[folder.name] = time.time()
+        self._last_successful_sync_at_mono[folder.name] = time.monotonic()
+        was_degraded = self._degraded_folders.pop(folder.name, None) is not None
+        if was_degraded:
+            self._notifier.send_status(self._compose_status_payload())
 
     async def _process_folder(self, folder: FolderConfig) -> bool:
         """Processa uma tarefa de sincronização, fim a fim. Retorna True em sucesso."""
-        log.info("[%s] Iniciando job (modo=%s).", folder.name, folder.git_mode)
+        if folder.git_handling == "skip":
+            log.info("[%s] [FOLDER_SKIP] git_handling=skip — ciclo pulado.", folder.name)
+            # Marca como sucesso para não disparar staleness (ADR-005) — folder
+            # skipped intencionalmente não é "sem sucesso há Xh".
+            self._mark_success(folder)
+            return True
 
-        if self._is_bundle_flow(folder):
+        log.info("[%s] Iniciando job (modo=%s).", folder.name, folder.git_handling)
+
+        if folder.git_handling == "auto":
+            success = await self._process_auto(folder)
+        elif folder.git_handling == "bundle":
             await self._sync_git_folder(folder)
             success = True
-        else:
-            # Modos "bisync" e "off" caem aqui — diferença está só nos excludes.
+        else:  # "plain"
             success = await self.engine.bisync_folder(folder)
 
         if success:
-            self._last_successful_sync_at[folder.name] = time.time()
-            self._last_successful_sync_at_mono[folder.name] = time.monotonic()
-            was_degraded = self._degraded_folders.pop(folder.name, None) is not None
-            if was_degraded:
-                self._notifier.send_status(self._compose_status_payload())
+            self._mark_success(folder)
         return success
+
+    async def _process_auto(self, folder: FolderConfig) -> bool:
+        """Dispatch auto-detect (ADR-008): classify + bundle per-repo + bisync do restante.
+
+        Sucesso agregado por AND: falha em qualquer bundle individual OU no bisync
+        do conteúdo restante derruba o ciclo do folder, permitindo que staleness
+        (ADR-005) acione após threshold. Evita o cenário "repo local-only sem
+        backup" cego — diferente do modo `bundle` legado em _sync_git_folder que
+        engole falhas individuais (não regredido por simetria; comportamento
+        legado preexistente).
+
+        - repos com remote → skip (vira --exclude no bisync)
+        - repos sem remote → bundle (sincronizado via _bundle_single_repo)
+        - repo_overrides ganham precedência total sobre auto-detect
+        - quando `folder.local_path` é ele próprio um repo (subpath=""), pula bisync
+          do restante — o folder inteiro é o repo, já tratado individualmente
+        """
+        from .git_handler import classify_repos, detect_repo_mode_flips
+
+        classifications = classify_repos(folder, self.cfg.git)
+
+        # Flip detection (per ADR-008 §Mitigações): primeiro ciclo pós-restart silente.
+        prev = self._last_classification.get(folder.name, {})
+        for repo_subpath, old_mode, new_mode in detect_repo_mode_flips(
+            folder.name, prev, classifications
+        ):
+            self._notifier.repo_mode_flip(folder.name, repo_subpath, old_mode, new_mode)
+        self._last_classification[folder.name] = {
+            c.repo_subpath: c.mode for c in classifications
+        }
+
+        # Bundle cada repo classificado como bundle.
+        all_success = True
+        for c in classifications:
+            if c.mode == "bundle":
+                if not await self._bundle_single_repo(folder, c.repo_path):
+                    all_success = False
+
+        # Quando o folder inteiro é um repo (root classificado), pular bisync do restante.
+        if any(c.repo_subpath == "" for c in classifications):
+            return all_success
+
+        # Bisync conteúdo não-repo, excluindo todos os repos classificados.
+        extra_excludes = [f"/{c.repo_subpath}/**" for c in classifications if c.repo_subpath]
+        bisync_ok = await self.engine.bisync_folder(folder, extra_excludes=extra_excludes)
+        return all_success and bisync_ok
 
     # ------------------------------------------------------------------
     # Fluxo para pastas Git: empacota e sobe somente o(s) bundle(s).
     # ------------------------------------------------------------------
     async def _sync_git_folder(self, folder: FolderConfig) -> None:
-        """Para cada repo dentro da pasta:
-        1. Verifica se o bundle remoto é mais novo (e baixa, se for).
-        2. Restaura o repo a partir do bundle (se não existir local).
-        3. Recria/atualiza o bundle a partir do worktree local.
-        4. Sobe o bundle.
+        """Itera repos sob folder.local_path e bundla cada um (modo `bundle`).
+
+        Modo `auto` usa _bundle_single_repo direto a partir da classificação.
         """
-        from .git_handler import (
-            bundle_path_for,
-            create_bundle,
-            find_git_repos,
-            is_git_repo,
-            repo_last_modified,
-            restore_from_bundle,
-            should_replace_bundle,
-        )
+        from .git_handler import find_git_repos, is_git_repo
 
         root = folder.local_path
         # Quando a pasta-raiz é um repo, ela própria entra na lista; quando não,
@@ -134,40 +181,57 @@ class SyncDaemon:
             return
 
         for repo in repos:
-            rel = repo.relative_to(root) if repo != root else Path(repo.name)
-            local_bundle = bundle_path_for(
-                repo, root, self.cfg.git.bundles_dir / folder.fs_key, self.cfg.git.bundle_suffix
-            )
-            remote_rel = str(rel.with_suffix(rel.suffix + self.cfg.git.bundle_suffix))
+            await self._bundle_single_repo(folder, repo)
 
-            # 1. Baixa o bundle remoto, se for mais novo (rclone --update cuida disso).
-            #    Salva num caminho temporário para comparar.
-            tmp_remote = local_bundle.with_suffix(local_bundle.suffix + ".incoming")
-            await self.engine.download_bundle_if_newer(folder, remote_rel, tmp_remote)
+    async def _bundle_single_repo(self, folder: FolderConfig, repo: Path) -> bool:
+        """Bundle de um repo específico (compartilhado entre `bundle` e `auto`).
 
-            # Decide qual lado é o mais atualizado.
-            local_repo_mtime = repo_last_modified(repo)
-            remote_bundle_mtime = tmp_remote.stat().st_mtime if tmp_remote.exists() else 0.0
-            local_bundle_mtime = local_bundle.stat().st_mtime if local_bundle.exists() else 0.0
+        Retorna True em sucesso. Modo `auto` agrega via AND para alimentar
+        staleness ADR-005; modo `bundle` legado ignora o retorno (comportamento
+        preexistente em _sync_git_folder).
+        """
+        from .git_handler import (
+            bundle_path_for,
+            create_bundle,
+            repo_last_modified,
+            restore_from_bundle,
+            should_replace_bundle,
+        )
 
-            log.debug(
-                "[%s] %s — repo_mtime=%.0f remote_bundle=%.0f local_bundle=%.0f",
-                folder.name, repo, local_repo_mtime, remote_bundle_mtime, local_bundle_mtime,
-            )
+        root = folder.local_path
+        rel = repo.relative_to(root) if repo != root else Path(repo.name)
+        local_bundle = bundle_path_for(
+            repo, root, self.cfg.git.bundles_dir / folder.fs_key, self.cfg.git.bundle_suffix
+        )
+        remote_rel = str(rel.with_suffix(rel.suffix + self.cfg.git.bundle_suffix))
 
-            if remote_bundle_mtime > local_repo_mtime and remote_bundle_mtime > local_bundle_mtime:
-                # Nuvem é mais nova → restaura a partir dela.
-                log.info("[%s] Bundle remoto mais novo para %s — restaurando.", folder.name, rel)
-                tmp_remote.replace(local_bundle)
-                restore_from_bundle(local_bundle, repo)
-            else:
-                # Local é mais novo (ou empate) → regenera bundle e sobe.
-                if tmp_remote.exists():
-                    tmp_remote.unlink()
-                if should_replace_bundle(repo, local_bundle):
-                    if not create_bundle(repo, local_bundle, self.cfg.git.bundle_all):
-                        continue
-                await self.engine.upload_bundle(local_bundle, folder, remote_rel)
+        # 1. Baixa o bundle remoto, se for mais novo (rclone --update cuida disso).
+        #    Salva num caminho temporário para comparar.
+        tmp_remote = local_bundle.with_suffix(local_bundle.suffix + ".incoming")
+        await self.engine.download_bundle_if_newer(folder, remote_rel, tmp_remote)
+
+        # Decide qual lado é o mais atualizado.
+        local_repo_mtime = repo_last_modified(repo)
+        remote_bundle_mtime = tmp_remote.stat().st_mtime if tmp_remote.exists() else 0.0
+        local_bundle_mtime = local_bundle.stat().st_mtime if local_bundle.exists() else 0.0
+
+        log.debug(
+            "[%s] %s — repo_mtime=%.0f remote_bundle=%.0f local_bundle=%.0f",
+            folder.name, repo, local_repo_mtime, remote_bundle_mtime, local_bundle_mtime,
+        )
+
+        if remote_bundle_mtime > local_repo_mtime and remote_bundle_mtime > local_bundle_mtime:
+            # Nuvem é mais nova → restaura a partir dela.
+            log.info("[%s] Bundle remoto mais novo para %s — restaurando.", folder.name, rel)
+            tmp_remote.replace(local_bundle)
+            return restore_from_bundle(local_bundle, repo)
+        # Local é mais novo (ou empate) → regenera bundle e sobe.
+        if tmp_remote.exists():
+            tmp_remote.unlink()
+        if should_replace_bundle(repo, local_bundle):
+            if not create_bundle(repo, local_bundle, self.cfg.git.bundle_all):
+                return False
+        return await self.engine.upload_bundle(local_bundle, folder, remote_rel)
 
     # ------------------------------------------------------------------
     # Workers e scheduler

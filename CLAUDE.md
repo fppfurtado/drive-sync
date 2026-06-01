@@ -62,17 +62,30 @@ Non-obvious behaviors that have caused multi-day incidents — preserve them:
 - **Cooldown por folder gate-keia também o periodic full-sync** ([ADR-004](../docs/decisions/ADR-004-cooldown-gate-periodic-full-sync.md)): `cooldown_seconds` em `FolderConfig` é opt-in (default 0 = desligado). Quando > 0, o gate é avaliado no worker (`daemon.py:_worker`) **antes** do `_inflight_lock` e absorve tanto eventos do watcher quanto ciclos da safety-net `watcher.periodic_full_sync_seconds` para aquela pasta. Janela conta from-start (`_last_sync_at` é setado antes do `_process_folder`), não from-finish — falha cedo não estende a janela. Estado in-memory (`_last_sync_at`, `_cooldown_scheduled`, `_cooldown_tasks`); sem persistência cross-restart — restart gera no máximo 1 upload extra. Motivação principal: `git_mode: bundle` em repo com `.git/` na casa dos GB (rclone não faz delta upload de blob no backend protondrive).
 - **Staleness per-folder sinaliza degraded sem pausar** ([ADR-005](../docs/decisions/ADR-005-folder-staleness-degraded.md) + [ADR-007](../docs/decisions/ADR-007-staleness-monotonic-suspend-aware.md)): pasta sem `_process_folder` retornando sucesso há mais que `watcher.folder_staleness_threshold_seconds` (default 12h, opt-out via 0) entra em `_degraded_folders` e dispara `Notifier.folder_degraded` (log `[FOLDER_DEGRADED]` + `notify-send`) + `STATUS=degraded folders: <lista>` via sd_notify. **Distinto de ADR-003** (auth global com pausa) — staleness é per-folder, sem pausa de workers; STATUS é agregada no daemon (`_compose_status_payload`) com precedência auth > folder. Reset por sucesso (silencioso, sem `notify-send` de recuperação). Detecção piggyback no `_periodic_full_sync` (gate de auth-degraded executado antes); requer `periodic_full_sync_seconds > 0` (validado no `config.load_config`). **Dual-clock (ADR-007)**: gate consulta monotonic (`time.monotonic()`, alinhado com ADR-004 — suspend congela com o processo, evita falso-positivo após suspend > threshold); reason em `min(elapsed_wall, elapsed_mono)` preserva "horas reais" cap por gap de cadência. Restart re-avalia a janela contra `_daemon_start_monotonic` (erra para falso-negativo pós-restart por até threshold ativas — folder com falha real preexistente fica invisível na primeira janela; trade-off aceito vs. falso-positivo de ADR-005 original). Estado in-memory (`_last_successful_sync_at`, `_last_successful_sync_at_mono`, `_degraded_folders`, `_daemon_start_time`, `_daemon_start_monotonic`).
 
-## git_mode Semantics
+## git_handling Semantics
+
+Substitui `git_mode` legado ([ADR-008](docs/decisions/ADR-008-abandonar-bisync-repos-git.md)). Repos git com remote saem do sync (GitHub é o backup); repos local-only (sem remote) ganham bundle. Não-git permanece em bisync.
 
 | Mode | What syncs | When to use |
 |---|---|---|
-| `off` | Everything (no excludes) | Non-code folders (Documents, Pictures) |
-| `bisync` (default) | Full worktree + `.git/`, minus build artifacts | All code folders |
-| `bundle` | Only `.gitbundle` file | Repos with very large `.git/` history |
+| `auto` (default) | Scan `.git/` + `git remote -v` decide per repo descoberto | Folders com repos git mistos (default) |
+| `skip` | Nada (folder pulado inteiro, marca sucesso) | Folder inteiro fora do escopo de sync |
+| `bundle` | Apenas `.gitbundle` por repo | Folder com repo local-only ao nível raiz; ou histórico `.git/` na casa dos GB |
+| `plain` | Tudo (worktree puro, sem excludes git) | Folders não-git (Documents, Pictures, library, videos) |
 
-The `bundle` mode is opt-in. `bisync` is the preferred default because it syncs uncommitted changes and keeps the cloud copy as a usable git repo.
+`auto` é o caminho-comum: loader varre `find_git_repos` (recursivo até `max_recursion_depth=6`); para cada repo, `git remote -v` vazio → bundle (no_remote), com remote → skip (has_remote). Override caso-a-caso via `repo_overrides: [{repo_subpath, mode: skip|bundle}]`. Bisync do conteúdo não-repo no folder usa `--exclude /<repo_subpath>/**` por repo classificado.
 
-Cada folder pode adicionalmente declarar `subpath_overrides: [{subpath, git_mode}]` para subpastas específicas — expansão acontece em `load_config` e o runtime vê apenas a lista plana ([ADR-006](../docs/decisions/ADR-006-git-mode-subpath-override.md)).
+**Caveat WIP-cross-device:** o default histórico `bisync` (pré-ADR-008) era documentado como "preferred because it syncs uncommitted changes". Esse caminho deixa de existir em `auto`: repos com remote saem do sync. Operador que precisa de WIP-cross-device: (a) commit + push GitHub explícito; (b) `repo_overrides: [{repo_subpath: X, mode: bundle}]` força bundle (preserva HEAD + branches, mas não index/worktree). Gatilho de revisão registrado em ADR-008 §Gatilhos.
+
+**Caveat proxy `git remote -v` falsificável:** classifier confia em "≥1 remote = backup externo existe". Remote configurado mas não-funcional (fork deletado, mirror read-only, nunca pushed) vira `skip` silencioso. Mitigação: log enriquecido `[REPO_SKIP] <repo> (has_remote: <url>)` permite operador grepar journal e detectar remotes suspeitos; override via `repo_overrides: [{repo_subpath, mode: bundle}]` força bundle quando operador sabe que o remote é fictício. `journalctl --user -u drive-sync --grep "REPO_"` dá visibilidade do dispatch.
+
+**Caveat repo-em-repo:** se `folder.local_path` é ele próprio um repo E contém sub-repos aninhados, ambos são classificados separadamente — bundle do root captura conteúdo dos sub-repos como diretórios normais, sub-repos individuais também recebem bundle próprio (dupla cobertura). Configuração rara; aceita como trade-off conhecido.
+
+**Flip detection:** estado in-memory `_last_classification: dict[folder_name, dict[repo_subpath, mode]]`; mudança de mode entre ciclos dispara log `[REPO_MODE_FLIP]` (WARNING) + `Notifier.repo_mode_flip` (notify-send). Primeiro ciclo pós-restart silencioso (estado vazio).
+
+**Migração de config:** `git_mode` em qualquer valor (`bisync|bundle|off`) é rejeitado pelo loader (falha-fast simétrica). Playbook completo em [docs/operations/playbook-flip-git-handling.md](docs/operations/playbook-flip-git-handling.md).
+
+Cada folder pode adicionalmente declarar `subpath_overrides: [{subpath, git_handling}]` para subpastas arbitrárias — expansão acontece em `load_config` e o runtime vê apenas a lista plana ([ADR-006](docs/decisions/ADR-006-git-mode-subpath-override.md)). Coexistência com `repo_overrides`: precedência por path descoberto (repo_overrides ganha em paths classificados como repo; subpath_overrides aplica fora dessa interseção).
 
 ## Config Location
 

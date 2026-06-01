@@ -35,13 +35,13 @@ def _make_config(folders: list[FolderConfig] | None = None) -> AppConfig:
 
 
 def _folder(
-    name: str = "test", git_mode: str = "bisync", cooldown_seconds: int = 0
+    name: str = "test", git_handling: str = "plain", cooldown_seconds: int = 0
 ) -> FolderConfig:
     return FolderConfig(
         name=name,
         local_path=Path(f"/tmp/{name}"),
         remote_subpath=name,
-        git_mode=git_mode,
+        git_handling=git_handling,
         cooldown_seconds=cooldown_seconds,
     )
 
@@ -50,27 +50,38 @@ def _folder(
 # _is_bundle_flow
 # ---------------------------------------------------------------------------
 
-def test_bundle_mode_is_bundle_flow():
+def test_bundle_handling_is_bundle_flow():
     daemon = SyncDaemon(_make_config())
-    assert daemon._is_bundle_flow(_folder(git_mode="bundle")) is True
+    assert daemon._is_bundle_flow(_folder(git_handling="bundle")) is True
 
 
-def test_bisync_mode_is_not_bundle_flow():
+def test_auto_handling_is_not_bundle_flow():
     daemon = SyncDaemon(_make_config())
-    assert daemon._is_bundle_flow(_folder(git_mode="bisync")) is False
+    assert daemon._is_bundle_flow(_folder(git_handling="auto")) is False
 
 
-def test_off_mode_is_not_bundle_flow():
+def test_plain_handling_is_not_bundle_flow():
     daemon = SyncDaemon(_make_config())
-    assert daemon._is_bundle_flow(_folder(git_mode="off")) is False
+    assert daemon._is_bundle_flow(_folder(git_handling="plain")) is False
 
 
 # ---------------------------------------------------------------------------
 # _process_folder — routing
 # ---------------------------------------------------------------------------
 
-async def test_bisync_mode_calls_engine_bisync():
-    folder = _folder(git_mode="bisync")
+async def test_auto_handling_calls_engine_bisync_with_extra_excludes():
+    """Auto sem repos descobertos → bisync com extra_excludes=[] (lista vazia)."""
+    folder = _folder(git_handling="auto")
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=True)
+
+    await daemon._process_folder(folder)
+
+    daemon.engine.bisync_folder.assert_called_once_with(folder, extra_excludes=[])
+
+
+async def test_plain_handling_calls_engine_bisync():
+    folder = _folder(git_handling="plain")
     daemon = SyncDaemon(_make_config([folder]))
     daemon.engine.bisync_folder = AsyncMock(return_value=True)
 
@@ -79,18 +90,8 @@ async def test_bisync_mode_calls_engine_bisync():
     daemon.engine.bisync_folder.assert_called_once_with(folder)
 
 
-async def test_off_mode_calls_engine_bisync():
-    folder = _folder(git_mode="off")
-    daemon = SyncDaemon(_make_config([folder]))
-    daemon.engine.bisync_folder = AsyncMock(return_value=True)
-
-    await daemon._process_folder(folder)
-
-    daemon.engine.bisync_folder.assert_called_once_with(folder)
-
-
-async def test_bundle_mode_calls_sync_git_folder():
-    folder = _folder(git_mode="bundle")
+async def test_bundle_handling_calls_sync_git_folder():
+    folder = _folder(git_handling="bundle")
     daemon = SyncDaemon(_make_config([folder]))
     daemon._sync_git_folder = AsyncMock()
 
