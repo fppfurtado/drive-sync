@@ -31,6 +31,16 @@ class Notifier:
         log.critical("[FOLDER_DEGRADED] %s: %s", folder, reason)
         self._notify_send(f"drive-sync — {folder} degraded", reason)
 
+    def repo_mode_flip(self, folder: str, repo_subpath: str, old_mode: str, new_mode: str) -> None:
+        """Sinaliza flip de mode em repo descoberto (ADR-008).
+
+        Evento informativo (não muda STATUS=, não pausa workers) — operador
+        percebe na hora que classificação mudou e pode auditar lixo no Proton.
+        """
+        target = repo_subpath or "<root>"
+        body = f"{folder}/{target}: {old_mode}→{new_mode}"
+        self._notify_send("drive-sync: repo mode flip", body)
+
     def send_status(self, payload: str) -> None:
         """Permite ao daemon emitir STATUS composta diretamente (ADR-005)."""
         self._systemd_notify(payload)

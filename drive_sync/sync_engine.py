@@ -183,8 +183,19 @@ class RcloneEngine:
         log.debug("[%s] Diretório remoto garantido: %s", name, remote)
         return True
 
-    async def bisync_folder(self, folder: FolderConfig, local_override: Path | None = None) -> bool:
-        """Executa bisync para uma tarefa. Retorna True em sucesso."""
+    async def bisync_folder(
+        self,
+        folder: FolderConfig,
+        local_override: Path | None = None,
+        extra_excludes: list[str] | None = None,
+    ) -> bool:
+        """Executa bisync para uma tarefa. Retorna True em sucesso.
+
+        extra_excludes (ADR-008): padrões adicionais injetados pelo daemon em
+        modo `auto` — paths de repos descobertos viram excludes para que o
+        bisync cubra só conteúdo não-repo (skip excluído do sync; bundle
+        sincronizado em flow separado).
+        """
         local = local_override or folder.local_path
         remote = remote_uri_for(folder, self.app)
         marker = _state_marker_for(local, remote)
@@ -200,13 +211,20 @@ class RcloneEngine:
         # Cria diretórios vazios também.
         cmd += ["--create-empty-src-dirs"]
 
-        # Mescla excludes: usuário + presets automáticos (quando aplicável).
-        # `bundle` não passa por aqui, então só checamos auto_exclude.
+        # Mescla excludes: usuário + presets automáticos (quando aplicável) + extras do daemon.
+        # `bundle` não passa por aqui; `auto` injeta extras via extra_excludes quando há
+        # repos descobertos (ADR-008).
         excludes: list[str] = list(folder.exclude)
         if folder.auto_exclude:
             # Mantém ordem (usuário primeiro, depois presets) e remove duplicatas.
             seen: set[str] = set(excludes)
             for pat in default_excludes_for_code():
+                if pat not in seen:
+                    excludes.append(pat)
+                    seen.add(pat)
+        if extra_excludes:
+            seen = set(excludes)
+            for pat in extra_excludes:
                 if pat not in seen:
                     excludes.append(pat)
                     seen.add(pat)

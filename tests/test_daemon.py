@@ -35,7 +35,7 @@ def _make_config(folders: list[FolderConfig] | None = None) -> AppConfig:
 
 
 def _folder(
-    name: str = "test", git_handling: str = "auto", cooldown_seconds: int = 0
+    name: str = "test", git_handling: str = "plain", cooldown_seconds: int = 0
 ) -> FolderConfig:
     return FolderConfig(
         name=name,
@@ -69,14 +69,15 @@ def test_plain_handling_is_not_bundle_flow():
 # _process_folder — routing
 # ---------------------------------------------------------------------------
 
-async def test_auto_handling_calls_engine_bisync():
+async def test_auto_handling_calls_engine_bisync_with_extra_excludes():
+    """Auto sem repos descobertos → bisync com extra_excludes=[] (lista vazia)."""
     folder = _folder(git_handling="auto")
     daemon = SyncDaemon(_make_config([folder]))
     daemon.engine.bisync_folder = AsyncMock(return_value=True)
 
     await daemon._process_folder(folder)
 
-    daemon.engine.bisync_folder.assert_called_once_with(folder)
+    daemon.engine.bisync_folder.assert_called_once_with(folder, extra_excludes=[])
 
 
 async def test_plain_handling_calls_engine_bisync():
