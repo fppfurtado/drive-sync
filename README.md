@@ -22,9 +22,9 @@ mudanças, `git bundle` para projetos Git, e `systemd --user` para auto-start.
 | Sync assíncrona, arquivo grande não bloqueia outros | `daemon.py` usa `asyncio.Queue` + N workers + `asyncio.Semaphore`; cada pasta é um job independente |
 | Não esforço duplicado em subpastas | `watcher.owning_folder` + `dedupe.skip_subpaths_of_configured_folders` |
 | Logs com rotação | `logging_setup.CompressingRotatingFileHandler` (rotação por tamanho + gzip) |
-| Detecta projeto Git e sobe só o `git bundle` | Disponível como `git_mode: bundle` (opt-in); padrão é `bisync` que sobe worktree completo |
+| Detecta projeto Git e classifica por remote | `git_handling: auto` (default): repo com remote → skip; repo sem remote → bundle. ADR-008. |
 | Conflito de bundle → vence o mais novo | `daemon._sync_git_folder` compara `repo_last_modified` × mtime do bundle remoto |
-| Projetos Git dentro de projetos Git | `git_handler.find_git_repos` (modo `bundle`) ou pelo próprio bisync (modo `bisync`) |
+| Projetos Git dentro de projetos Git | `git_handler.find_git_repos` recursivo; cada repo recebe classificação própria em modo `auto` ou bundle próprio em modo `bundle` |
 | Excludes automáticos para artefatos de build | `exclude_presets.default_excludes_for_code` aplicado quando `auto_exclude: true` |
 | Parametrização ampla | `config.example.yaml` cobre rclone, pastas, git, watcher, dedupe, logging |
 
@@ -100,7 +100,7 @@ drive-sync-folder add \
   --name fotos \
   --path ~/Imagens \
   --remote Fotos \
-  --git-mode off \
+  --git-handling plain \
   --exclude '*.tmp' '.thumbnails/**'
 
 # Remove
@@ -117,13 +117,14 @@ Tudo no `config.yaml`:
 
 - **rclone**: nome do remote, raiz remota, binário, flags globais (transfers, retries, etc.).
 - **folders[]**: por tarefa — caminho local, subpath remoto, `enabled`,
-  `git_mode` (`off`/`bisync`/`bundle`), `auto_exclude`, padrões `exclude`,
-  `debounce_seconds`, `cooldown_seconds` (rate-limit por pasta; opt-in para
-  folders com custo de sync alto, ex.: bundle mode em repo `.git/` grande),
-  `subpath_overrides` (override de `git_mode` por subpasta — ADR-006; cooldown
-  e demais campos herdam do parent; expansão acontece no `load_config` em
-  folders synthetic, então `drive-sync --status` mostra a lista pós-expansão
-  enquanto `drive-sync-folder list` opera sobre o YAML cru).
+  `git_handling` (`auto`/`skip`/`bundle`/`plain` — ADR-008), `auto_exclude`,
+  padrões `exclude`, `debounce_seconds`, `cooldown_seconds` (rate-limit por
+  pasta; opt-in para folders com custo de sync alto, ex.: bundle mode em
+  repo `.git/` grande), `subpath_overrides` (override de `git_handling` por
+  subpasta — ADR-006), `repo_overrides` (override por repo descoberto em
+  modo `auto`, schema `[{repo_subpath, mode: skip|bundle}]` — ADR-008;
+  precedência total sobre auto-detect; coexistência com `subpath_overrides`
+  validada no loader).
 - **git**: diretório dos bundles, sufixo, `bundle_all`, `recursive_detection`,
   `max_recursion_depth`.
 - **watcher**: tamanho da fila, `max_concurrent_jobs`, sync periódica de
@@ -145,35 +146,35 @@ que mantém estado em `~/.cache/rclone/bisync/`. Na primeira execução de
 um par é necessário `--resync` para construir esse estado — o engine faz
 isso automaticamente via marker file.
 
-### `git_mode`: `off` × `bisync` × `bundle`
+### `git_handling`: `auto` × `skip` × `bundle` × `plain`
 
-A taxonomia mudou na v0.2 e vale entender quando usar cada um:
+A taxonomia mudou em [ADR-008](docs/decisions/ADR-008-abandonar-bisync-repos-git.md) (anteriormente `git_mode: off|bisync|bundle`). Resumo:
 
-- **`off`** — bisync puro, sem nenhum tratamento de Git. Use para pastas
-  que não têm código (Documents, Pictures, Videos).
-- **`bisync`** (padrão) — bisync mais a aplicação automática de excludes
-  comuns de artefatos de build (`node_modules/**`, `__pycache__/**`,
-  `target/**`, `.venv/**` etc.). Use para todas as pastas com código.
-  O worktree completo é sincronizado, incluindo arquivos não commitados,
-  e o `.git/` vai junto — o repo permanece utilizável tanto local quanto
-  na nuvem.
-- **`bundle`** — empacota cada repositório com `git bundle create --all` e
-  sobe só o arquivo binário. **Opt-in.** Use apenas quando você tiver
-  repos com `.git/` muito grande (anos de histórico, blobs versionados),
-  e o custo de sincronizar arquivo a arquivo for proibitivo. Trade-off
-  importante: bundle não inclui worktree nem mudanças não commitadas — só
-  o histórico publicado. Para a maioria dos casos, `bisync` ganha.
+- **`auto`** (padrão para folders de código) — scan recursivo `.git/` +
+  `git remote -v` decide per repo descoberto: repo com remote → skip (GitHub
+  é o backup); repo sem remote → bundle. Folder syncha conteúdo não-repo via
+  bisync. Override caso-a-caso via `repo_overrides: [{repo_subpath, mode}]`.
+- **`skip`** — folder inteiro pulado (marca sucesso sem sync). Útil para
+  excluir um folder do escopo sem removê-lo do config.
+- **`bundle`** — bundle por-repo recursivo. Use quando o folder.local_path
+  é ele próprio um repo local-only (caso `dev-scripts`), ou quando há repo
+  com `.git/` na casa dos GB.
+- **`plain`** — bisync puro sem excludes git (renomeio explícito do antigo
+  `off`). Use para folders não-git (Documents, Pictures, library, videos).
 
-### Por que NÃO empacotamos repos Git por padrão?
+### Por que abandonamos bisync para repos git?
 
-A primeira versão deste projeto usava `git bundle` para todos os repos,
-inspirada na ideia de "menos chamadas de API à Proton". Mas isso traz dois
-problemas: (1) mudanças não commitadas não viajam — você precisa sempre
-lembrar de commitar antes de trocar de máquina; (2) na nuvem, o repo vira
-um único arquivo opaco, sem possibilidade de navegar pelo webclient.
-A v0.2 inverteu o padrão: bisync com excludes inteligentes resolve a
-maioria dos casos com a melhor experiência. `bundle` ficou como ferramenta
-para casos extremos.
+Dois incidentes recentes na fronteira drive-sync↔git (resurrection de ADRs
+archived, --resync invertido recriando arquivos pré-migration) fecharam a
+tese: `rclone bisync` não tem semântica de operação git (mv, rm, merge que
+apaga arquivo). Qualquer operação git que move/remove arquivo localmente
+vira "deleção" que bisync reconcilia copiando de volta do remote. Não é
+config de exclude — é mismatch de modelo.
+
+ADR-008 inverteu o default: repos git com remote saem do sync (GitHub é o
+backup); repos local-only ganham bundle. Trade-off conhecido: perde "cópia
+cloud de uncommitted changes" — mitigado via commit+push GitHub ou
+`repo_overrides: mode: bundle` em repos onde a perda dói.
 
 ### Repositórios aninhados
 `find_git_repos` faz DFS e **continua** descendo mesmo após encontrar um
