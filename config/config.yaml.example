@@ -15,49 +15,72 @@ rclone:
     - "--track-renames"
 
 # -----------------------------------------------------------------------------
-# git_mode options:
-#   bisync  — full worktree + .git, minus build artifacts (preferred for code)
-#   bundle  — only a .gitbundle file (for repos with very large .git/ history)
-#   off     — no git handling (non-code folders)
+# git_handling options (ADR-008):
+#   auto    — scan + `git remote -v` decide per repo (default for code folders).
+#             Repo com remote → skip; repo sem remote → bundle. Repo_overrides
+#             dá precedência total caso operador queira forçar.
+#   skip    — folder inteiro fora do sync; marca sucesso para não disparar
+#             staleness (ADR-005).
+#   bundle  — bundle por-repo (recursivo). Útil para folder onde o repo é a raiz
+#             E é local-only (caso `dev-scripts`), ou para repo com `.git/` na
+#             casa dos GB.
+#   plain   — bisync puro sem excludes git (folders não-git: Documents, Pictures,
+#             library, videos).
 #
-# auto_exclude: true  adds common build-artifact globs (node_modules, .venv, …)
+# auto_exclude: true adiciona globs comuns de build artifacts (node_modules,
+# .venv, etc.) ao bisync. Aplica em modos auto/plain; bundle ignora.
 #
-# cooldown_seconds: 0  (default, disabled). When > 0, rate-limits this folder
-# independently of debounce_seconds and periodic_full_sync_seconds — at most
-# one sync per cooldown window, counted from the start of each sync. Subsequent
-# events within the window are absorbed. Gates BOTH watcher events AND
-# periodic_full_sync cycles for this folder (see ADR-004). Typical use:
-# git_mode: bundle on a repo with multi-GB .git/ where rclone re-uploads the
-# whole bundle every job (no delta upload on the protondrive backend).
+# cooldown_seconds: 0 (default, disabled). Quando > 0, rate-limita o folder
+# independente de debounce_seconds e periodic_full_sync_seconds — no máximo
+# 1 sync por janela, contada do início. Eventos no meio são absorvidos. Gate
+# vale tanto para watcher quanto para periodic_full_sync (ADR-004). Caso típico:
+# git_handling: bundle em repo com .git/ multi-GB (rclone não faz delta upload
+# de blob no protondrive — re-upload integral por job).
+#
+# repo_overrides (ADR-008): override por repo descoberto no auto-scan.
+# Schema: [{repo_subpath, mode: skip|bundle}]. Precedência total sobre
+# auto-detect; útil para forçar bundle quando o remote é fictício (fork
+# deletado, mirror read-only) ou para excluir repo experimental do sync.
+#
+# subpath_overrides (ADR-006): override de git_handling em subpath arbitrário.
+# Schema: [{subpath, git_handling: skip|bundle|plain}]. Coexiste com
+# repo_overrides; loader rejeita sobreposição na mesma lista.
 # -----------------------------------------------------------------------------
 folders:
 
-  # ---------- Code ----------
+  # ---------- Code (repos git com remote → skip; sem remote → bundle) ----------
   - name: "dev-projects"
     local_path: "~/dev/projects"
     remote_subpath: "dev/projects"
-    git_mode: "bisync"
+    git_handling: "auto"
     auto_exclude: true
     debounce_seconds: 40
     exclude:
       - "*.local"
-    # Override de git_mode por subpath (ADR-006). Demais campos (cooldown,
-    # debounce, exclude) herdam do parent.
+    # repo_overrides (ADR-008): force bundle em fork desconfiável.
+    # repo_overrides:
+    #   - repo_subpath: "fork-experimental"
+    #     mode: "bundle"
+    # subpath_overrides (ADR-006): override em path não-repo.
     # subpath_overrides:
-    #   - subpath: "tjpa/pje-2.1"
-    #     git_mode: "bundle"
+    #   - subpath: "scratch"
+    #     git_handling: "plain"
 
   - name: "dev-scripts"
     local_path: "~/dev/scripts"
     remote_subpath: "dev/scripts"
-    git_mode: "bisync"
+    # Caso real: folder.local_path é ele próprio um repo local-only — bundle do root
+    # captura o pacote inteiro (worktree + .git/). cooldown alto pra evitar re-upload
+    # frequente.
+    git_handling: "bundle"
+    cooldown_seconds: 10800           # 3h
     auto_exclude: true
     debounce_seconds: 40
 
   - name: "dotfiles"
     local_path: "~/.dotfiles"
     remote_subpath: "dotfiles"
-    git_mode: "bisync"
+    git_handling: "auto"
     auto_exclude: true
     debounce_seconds: 40
 
@@ -65,7 +88,7 @@ folders:
   - name: "logseq-vault"
     local_path: "~/Notes/Logseq"
     remote_subpath: "notes/logseq"
-    git_mode: "bisync"
+    git_handling: "auto"
     auto_exclude: true
     debounce_seconds: 40            # Logseq saves aggressively
     exclude:
@@ -73,11 +96,11 @@ folders:
       - "logseq/bak/**"
       - "logseq/version-files/**"
 
-  # ---------- Documents & media ----------
+  # ---------- Documents & media (folders não-git → plain) ----------
   - name: "documents"
     local_path: "~/Documents"
     remote_subpath: "documents"
-    git_mode: "off"
+    git_handling: "plain"
     auto_exclude: false
     debounce_seconds: 10
     exclude:
@@ -87,7 +110,7 @@ folders:
   - name: "library"
     local_path: "~/Library"
     remote_subpath: "library"
-    git_mode: "off"
+    git_handling: "plain"
     auto_exclude: false
     debounce_seconds: 60
     exclude:
@@ -98,7 +121,7 @@ folders:
   - name: "pictures-photos"
     local_path: "~/Pictures/Photos"
     remote_subpath: "pictures/photos"
-    git_mode: "off"
+    git_handling: "plain"
     auto_exclude: false
     debounce_seconds: 120
     exclude:
@@ -108,14 +131,14 @@ folders:
   - name: "pictures-screenshots"
     local_path: "~/Pictures/Screenshots"
     remote_subpath: "pictures/screenshots"
-    git_mode: "off"
+    git_handling: "plain"
     auto_exclude: false
     debounce_seconds: 5
 
   - name: "pictures-assets"
     local_path: "~/Pictures/Assets"
     remote_subpath: "pictures/assets"
-    git_mode: "off"
+    git_handling: "plain"
     auto_exclude: false
     debounce_seconds: 15
 
@@ -123,7 +146,7 @@ folders:
   - name: "videos"
     local_path: "~/Videos"
     remote_subpath: "videos"
-    git_mode: "off"
+    git_handling: "plain"
     auto_exclude: false
     debounce_seconds: 180
     exclude:
@@ -131,15 +154,14 @@ folders:
       - "*.part"
 
 # -----------------------------------------------------------------------------
-# bundle mode: only useful for repos with a very large .git/ history.
-# Not referenced by any folder above (all use bisync or off).
+# bundle mode infra (compartilhada por git_handling: auto e bundle).
 # -----------------------------------------------------------------------------
 git:
   bundles_dir: "~/.cache/drive-sync/bundles"
   bundle_suffix: ".gitbundle"
   bundle_all: true
   recursive_detection: true
-  max_recursion_depth: 4
+  max_recursion_depth: 6
 
 watcher:
   queue_size: 2000
