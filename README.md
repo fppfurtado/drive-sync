@@ -45,6 +45,8 @@ cd drive-sync
 bash scripts/install.sh
 ```
 
+O `install.sh` roda `pipx install -e --force` (modo editable, ADR-009) — `git pull` reflete imediatamente na CLI; daemon precisa de restart para reimportar. Use `bash scripts/update.sh` como ritual pós-pull (`git pull --ff-only && systemctl --user restart drive-sync`).
+
 Depois disso, configure o remote rclone uma única vez:
 
 ```bash

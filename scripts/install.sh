@@ -12,9 +12,13 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 say()  { printf '\e[1;34m==>\e[0m %s\n' "$*"; }
 warn() { printf '\e[1;33m[!] %s\e[0m\n' "$*"; }
 
-# 1) Instala o pacote no user-site via pipx
-say "Instalando o pacote drive-sync..."
-pipx install --force "$PROJECT_DIR"
+# 1) Instala o pacote no user-site via pipx em modo editable (ADR-009).
+# Editable aponta o entry-point pro checkout: `git pull` reflete imediatamente
+# na CLI (daemon ainda precisa restart pra reimportar — Python sem hot-reload).
+# `--force` necessário para re-execução em estado já instalado (pipx aborta
+# com "already seems to be installed" sem ele — comportamento upstream).
+say "Instalando o pacote drive-sync (modo editable)..."
+pipx install -e --force "$PROJECT_DIR"
 
 # 2) Cria o config se não existir
 mkdir -p "$CONFIG_HOME"
