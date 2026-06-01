@@ -9,28 +9,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Installation & Setup
 
 ```bash
-bash scripts/install.sh          # installs rclone, pipx-installs the package, sets up systemd unit
+bash scripts/install.sh          # pipx installs editable + systemd unit (ADR-009)
 rclone config                    # configure the remote (name it "proton" or per config.yaml)
 drive-sync --check               # validate config.yaml
 systemctl --user start drive-sync
 journalctl --user -u drive-sync -f
 ```
 
-## Development Workflow
-
-For dev, use an **isolated venv** — do NOT `pip install -e .` against system Python. On Fedora that overwrites the pipx-managed symlink at `~/.local/bin/drive-sync` and breaks the systemd unit (see "install: investigar regressão do symlink" in [BACKLOG.md](../BACKLOG.md)).
+Para atualizar pós `git pull` (ritual self-update, ADR-009):
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/python -m drive_sync --check    # validate config
-.venv/bin/python -m drive_sync --status   # snapshot do estado das pastas
-.venv/bin/python -m drive_sync --once     # one sync pass, exit
-.venv/bin/python -m drive_sync            # run as daemon
+bash scripts/update.sh           # git pull --ff-only + systemctl --user restart drive-sync
 ```
 
-Production install health check: `pipx list` should show `drive-sync` without the "symlink missing or pointing to unexpected location" warning.
+**Migração one-shot** (uma vez por host, pós-merge de ADR-009): se você tinha drive-sync instalado pelo `install.sh` pré-ADR-009 (modo snapshot, sem `-e`), rode `bash scripts/install.sh` uma vez para aplicar `-e --force` retroativamente — entry-point idempotente cobre o caso (mesmo caminho que fresh install). Confirmação: `pipx list` mostra `drive-sync` sem warning `symlink missing or pointing to unexpected location`; `which drive-sync` retorna symlink (não arquivo regular).
 
-Logs go to `~/.local/state/drive-sync/drive-sync.log` by default. Set `logging.level: DEBUG` in config.yaml for verbose output.
+Logs em `~/.local/state/drive-sync/drive-sync.log` por default. Set `logging.level: DEBUG` em config.yaml para verbose.
 
 test_command: `python -m pytest tests/ -v`
 
