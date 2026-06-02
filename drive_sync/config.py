@@ -16,6 +16,11 @@ _VALID_REPO_OVERRIDE_MODES = ("skip", "bundle")
 _VALID_SUBPATH_OVERRIDE_HANDLING = ("skip", "bundle", "plain")
 _LEGACY_GIT_MODE_VALUES = ("bisync", "bundle", "off")
 _PLAYBOOK_PATH = "docs/operations/playbook-flip-git-handling.md"
+# ADR-010: markers de build artifacts canônicos (Python/JS/Rust) — disparam
+# erro fatal no --check quando auto_exclude: false E scan detecta no local_path.
+# Match exato por Path.name (não substring): .venv-backup/ ou node_modules_old/
+# NÃO disparam. .git/ é fora do escopo (ADR-008 cobre estruturalmente).
+_AUTO_EXCLUDE_CODE_MARKERS = (".venv", "node_modules", "target")
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +117,50 @@ def _parse_repo_overrides(
         seen_subpaths.add(subpath)
         overrides.append(RepoOverride(repo_subpath=subpath, mode=mode))
     return overrides
+
+
+def _validate_auto_exclude_against_code(folder: "FolderConfig", max_depth: int) -> None:
+    """ADR-010: rejeita auto_exclude: false quando scan detecta markers de código.
+
+    Walk recursivo até max_depth (reusa git.max_recursion_depth, default 6) procurando
+    dirs cujo Path.name casa exato um marker em _AUTO_EXCLUDE_CODE_MARKERS. Skip
+    silente quando auto_exclude is True (caso comum) OU quando local_path não existe
+    (paridade com find_git_repos). .git/ inteiro fica fora do escopo do scan (ADR-008
+    endereça repos git via git_handling estruturalmente).
+    """
+    if folder.auto_exclude:
+        return
+    if not folder.local_path.exists():
+        return
+
+    hits: list[Path] = []
+    root = folder.local_path
+    for dirpath, dirnames, _filenames in os.walk(root):
+        rel_parts = Path(dirpath).relative_to(root).parts
+        # ADR-010 §Decisão (3): .git/ fora do escopo — ADR-008 cobre.
+        if ".git" in rel_parts:
+            dirnames.clear()
+            continue
+        if len(rel_parts) >= max_depth:
+            dirnames.clear()
+            continue
+        for d in dirnames:
+            if d in _AUTO_EXCLUDE_CODE_MARKERS:
+                hits.append(Path(dirpath) / d)
+
+    if not hits:
+        return
+
+    paths_listing = "\n".join(f"  - {p}/" for p in hits)
+    raise ValueError(
+        f"auto_exclude: false em {folder.name!r} E scan de {folder.local_path} "
+        f"detectou paths de código:\n"
+        f"{paths_listing}\n\n"
+        f"Defina `auto_exclude: true` (recomendado: cobre todos os build artifacts "
+        f"conhecidos sem listagem manual).\n\n"
+        f"Se precisa manter `auto_exclude: false` por razão específica, adicione globs "
+        f"em `exclude:` que cubram os paths listados acima e re-execute `--check`."
+    )
 
 
 def _validate_repo_subpath_overlap(
@@ -291,6 +340,10 @@ def load_config(path: Path | None = None) -> AppConfig:
     if not folders_raw:
         raise ValueError("Configuração inválida: a chave 'folders' não pode estar vazia.")
 
+    # Pré-parse de git.max_recursion_depth para reuso na validação de auto_exclude
+    # (ADR-010 §Decisão (2) — uniformidade com infra existente).
+    git_max_recursion_depth = int((raw.get("git") or {}).get("max_recursion_depth", 6))
+
     folders: list[FolderConfig] = []
     seen_names: set[str] = set()
     for entry in folders_raw:
@@ -343,6 +396,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             repo_overrides=repo_overrides,
         )
         folders.append(parent)
+        _validate_auto_exclude_against_code(parent, git_max_recursion_depth)
 
         # Ordem load-bearing: clone do exclude (em _expand_synthetic_folder)
         # acontece ANTES do append do glob no parent — synthetic não exclui a si mesmo.
