@@ -70,7 +70,20 @@ rclone purge proton:Sync/dev/projects/
 rclone purge proton:Sync/dotfiles/
 rclone purge proton:Sync/notes/logseq/
 
-# 2. Editar config.
+# 2. Invalidar markers bisync do drive-sync (PASSO CRÍTICO).
+#    Sem isso, daemon não dispara `--resync` no próximo ciclo e rclone bisync
+#    abortará com "Safety abort: too many deletes" (estado interno aponta para
+#    arquivos que estavam no remote pré-purge). Incidente real 2026-06-02 em
+#    dev-projects (31581 of 31608 deletes).
+#    Caminho mais simples: deletar TODOS os markers (daemon recria; --resync
+#    em folders plain não-afetados é idempotente em estado consistente —
+#    apenas re-cria state files sem transferir).
+rm -v ~/.cache/rclone/bisync/drive-sync.*.initialized
+#    Caminho cirúrgico (só os 4 folders afetados pelo flip — evita --resync
+#    em plain folders): computar sha1(local|remote)[:16] por folder. Helper
+#    Python em scripts/ ou one-liner inline.
+
+# 3. Editar config.
 $EDITOR ~/.config/drive-sync/config.yaml
 # Trocar todas as entries:
 #   git_mode: bisync   → git_handling: auto
@@ -78,12 +91,16 @@ $EDITOR ~/.config/drive-sync/config.yaml
 #   git_mode: bundle   → git_handling: bundle
 # (sed -i pode acelerar — backup do arquivo antes)
 
-# 3. Validar.
+# 4. Validar.
 .venv/bin/python -m drive_sync --check
 
-# 4. Restart.
+# 5. Restart.
 systemctl --user start drive-sync.service
 ```
+
+### Para o folder com repo local-only (sequência da seção acima)
+
+Adicionar passo entre `rclone purge proton:Sync/dev/scripts/` (step 6) e fechamento: invalidar marker do dev-scripts especificamente (sha1 do `local|remote` ou nuke total como acima).
 
 ## Renomeio em massa `off` → `plain`
 

@@ -86,6 +86,15 @@ class SyncDaemon:
         was_degraded = self._degraded_folders.pop(folder.name, None) is not None
         if was_degraded:
             self._notifier.send_status(self._compose_status_payload())
+        # Success marker per-folder — cobre `--status` para modos auto-skip e bundle
+        # que não criam markers/lst de bisync. Best-effort: falha aqui não derruba o ciclo.
+        try:
+            from .status import success_marker_for
+            marker = success_marker_for(folder.fs_key)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError as exc:
+            log.debug("success marker touch falhou para %s: %s", folder.name, exc)
 
     async def _process_folder(self, folder: FolderConfig) -> bool:
         """Processa uma tarefa de sincronização, fim a fim. Retorna True em sucesso."""

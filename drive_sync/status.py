@@ -26,6 +26,21 @@ def _default_bisync_dir() -> Path:
     return Path(base) / "rclone" / "bisync"
 
 
+def _success_state_dir() -> Path:
+    """Success markers per-folder — uniformiza --status entre todos os modos de dispatch.
+
+    Daemon._mark_success toca `<fs_key>.success` aqui após qualquer ciclo
+    bem-sucedido (bisync, bundle, ou skip via auto). --status lê o mtime
+    como fonte de verdade para `Last sync` quando presente.
+    """
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return Path(base) / "drive-sync" / "state"
+
+
+def success_marker_for(fs_key: str) -> Path:
+    return _success_state_dir() / f"{fs_key}.success"
+
+
 def _marker_name(local: Path, remote: str) -> str:
     # Duplicado de sync_engine._state_marker_for (private). Extrair para
     # módulo compartilhado só quando aparecer um 3º caller.
@@ -74,9 +89,16 @@ def render_status(cfg: AppConfig, bisync_dir: Path | None = None) -> str:
         if not folder.enabled:
             continue
         remote = remote_uri_for(folder, cfg)
-        marker = bisync_dir / _marker_name(folder.local_path, remote)
-        initialized = "yes" if marker.exists() else "no"
-        last = _format_mtime(_last_sync_mtime(folder.local_path, remote, bisync_dir))
+        # Preferência: success marker per-folder (cobre auto-skip e bundle); fallback
+        # para marker bisync + .lst (backward-compat para hosts pré-success-marker).
+        success = success_marker_for(folder.fs_key)
+        if success.exists():
+            initialized = "yes"
+            last = _format_mtime(success.stat().st_mtime)
+        else:
+            marker = bisync_dir / _marker_name(folder.local_path, remote)
+            initialized = "yes" if marker.exists() else "no"
+            last = _format_mtime(_last_sync_mtime(folder.local_path, remote, bisync_dir))
         rows.append((_contract_home(folder.local_path), initialized, last, remote))
 
     headers = ("Folder", "Initialized", "Last sync", "Remote")

@@ -190,3 +190,37 @@ def test_disabled_folder_is_omitted(tmp_path: Path):
     )
     assert "/tmp/docs" in out
     assert "/tmp/hidden" not in out
+
+
+# ---------- success marker (preferência sobre bisync) ----------
+
+def test_success_marker_overrides_bisync_marker_for_initialized_and_last_sync(
+    tmp_path: Path, monkeypatch
+):
+    """Per ADR de --status fallback: success marker é fonte primária; cobre auto/bundle."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    bisync = tmp_path / "rclone" / "bisync"
+    bisync.mkdir(parents=True)
+    state = tmp_path / "drive-sync" / "state"
+    state.mkdir(parents=True)
+    # Folder sem marker bisync MAS com success marker.
+    (state / "scripts.success").touch()
+    folders = [_folder("scripts", Path("/tmp/scripts"), "dev/scripts")]
+    out = render_status(_app(folders), bisync)
+    row = _row_for(out, "/tmp/scripts")
+    assert " yes " in row
+    assert "never" not in row  # mtime do success marker é recente
+
+
+def test_no_marker_at_all_shows_never(tmp_path: Path, monkeypatch):
+    """Sem nenhum sinal (bisync nem success) → no/never."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    bisync = tmp_path / "rclone" / "bisync"
+    bisync.mkdir(parents=True)
+    out = render_status(
+        _app([_folder("orphan", Path("/tmp/orphan"))]),
+        bisync,
+    )
+    row = _row_for(out, "/tmp/orphan")
+    assert " no " in row
+    assert "never" in row
