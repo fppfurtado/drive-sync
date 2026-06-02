@@ -7,7 +7,6 @@ __pycache__/
 # Local config (copy config/config.yaml.example to ~/.config/drive-sync/config.yaml)
 config/config.yaml
 
-.claude/settings.json
-.claude/local/
+.claude/
 
 .worktrees/
