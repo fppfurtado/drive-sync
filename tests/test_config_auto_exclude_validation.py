@@ -13,7 +13,12 @@ def _write_yaml(directory: Path, content: str) -> Path:
     return path
 
 
-def _yaml_with_folder(local_path: Path, auto_exclude: bool, max_depth: int | None = None) -> str:
+def _yaml_with_folder(
+    local_path: Path,
+    auto_exclude: bool,
+    max_depth: int | None = None,
+    git_handling: str = "plain",
+) -> str:
     depth_line = f"\ngit:\n  max_recursion_depth: {max_depth}" if max_depth is not None else ""
     return textwrap.dedent(f"""
         folders:
@@ -21,7 +26,7 @@ def _yaml_with_folder(local_path: Path, auto_exclude: bool, max_depth: int | Non
             local_path: {local_path}
             remote_subpath: test
             auto_exclude: {str(auto_exclude).lower()}
-            git_handling: plain
+            git_handling: {git_handling}
     """) + depth_line
 
 
@@ -224,3 +229,42 @@ def test_auto_exclude_false_uses_custom_max_recursion_depth(tmp_path):
     )
     app = load_config(cfg)
     assert app.folders[0].auto_exclude is False
+
+
+# ---------------------------------------------------------------------------
+# Gap descoberto pós-merge ADR-010: validator deve pular modos que não usam bisync
+# ---------------------------------------------------------------------------
+
+def test_auto_exclude_false_skips_validation_for_git_handling_bundle(tmp_path):
+    """git_handling: bundle não passa por bisync — auto_exclude irrelevante; validator skipa."""
+    (tmp_path / "target").mkdir()
+    cfg = _write_yaml(
+        tmp_path,
+        _yaml_with_folder(tmp_path, auto_exclude=False, git_handling="bundle"),
+    )
+    app = load_config(cfg)
+    assert app.folders[0].git_handling == "bundle"
+    assert app.folders[0].auto_exclude is False
+
+
+def test_auto_exclude_false_skips_validation_for_git_handling_skip(tmp_path):
+    """git_handling: skip → folder fora do sync; validator skipa."""
+    (tmp_path / ".venv").mkdir()
+    cfg = _write_yaml(
+        tmp_path,
+        _yaml_with_folder(tmp_path, auto_exclude=False, git_handling="skip"),
+    )
+    app = load_config(cfg)
+    assert app.folders[0].git_handling == "skip"
+
+
+def test_auto_exclude_false_validates_for_git_handling_auto(tmp_path):
+    """git_handling: auto bisync do não-repo com extra_excludes — auto_exclude aplica; validator dispara."""
+    (tmp_path / "node_modules").mkdir()
+    cfg = _write_yaml(
+        tmp_path,
+        _yaml_with_folder(tmp_path, auto_exclude=False, git_handling="auto"),
+    )
+    with pytest.raises(ValueError) as exc:
+        load_config(cfg)
+    assert "node_modules" in str(exc.value)

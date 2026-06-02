@@ -130,6 +130,11 @@ def _validate_auto_exclude_against_code(folder: "FolderConfig", max_depth: int) 
     """
     if folder.auto_exclude:
         return
+    # Modos `bundle` e `skip` não passam por bisync — auto_exclude não se aplica
+    # (ADR-008 dispatch). Apenas `auto` (bisync do não-repo com extra_excludes) e
+    # `plain` (bisync puro) usam auto_exclude meaningfully.
+    if folder.git_handling in ("bundle", "skip"):
+        return
     if not folder.local_path.exists():
         return
 

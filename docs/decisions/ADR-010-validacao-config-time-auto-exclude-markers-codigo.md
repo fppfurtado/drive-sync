@@ -31,6 +31,8 @@ Decisão central + dois parâmetros de escopo:
 
 **(3) Parâmetro de escopo — qualquer marker dentro de `.git/`** (incluindo `.git/objects/pack/`) está fora do escopo deste validador. `ADR-008` (`git_handling: auto|skip|bundle|plain`) já endereça estruturalmente "repo git em escopo de bisync" e cobre o cenário operador-com-folder-`git_handling: plain` + `auto_exclude: false` + repo git aninhado. Adicionar marker `.git/objects/pack/` aqui criaria caminho de erro duplicado para a mesma classe de problema. Divisão de responsabilidades: ADR-008 para classe git, ADR-010 para classe build artifacts não-git.
 
+**Adicionalmente — escopo restrito a modos que usam bisync** (descoberto pós-merge inicial, 2026-06-01): validator também skipa folders com `git_handling in {bundle, skip}` porque esses modos não passam por `rclone bisync` do worktree (bundle dispatcha por-repo via git bundle; skip pula o folder inteiro). Apenas `auto` (bisync do conteúdo não-repo com `extra_excludes`) e `plain` (bisync puro sem treatment git) usam `auto_exclude` meaningfully — validar para `bundle`/`skip` seria false-positive cumulativo (folder pje-2.1 em modo bundle tem `target/` legítimos do Maven que não são uploaded de qualquer jeito).
+
 Mensagem de erro multi-linha com **ação recomendada única + escape hatch explícito**:
 
 ```
