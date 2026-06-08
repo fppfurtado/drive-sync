@@ -174,10 +174,11 @@ def _validate_case_duplicates_against_remote(
     """ADR-011: rejeita case-duplicates Path1↔Path2 quando scan detecta siblings colidindo.
 
     Walk recursivo até max_depth (reusa git.max_recursion_depth); para cada dirpath,
-    agrupar dirnames por name.lower(); grupos com >= 2 nomes são case-duplicates.
-    Proton Drive é case-insensitive — qualquer par no mesmo dirpath colide em Path2.
-    Skip silente em git_handling bundle|skip (não passam por bisync; paridade com ADR-010)
-    OU quando local_path não existe. .git/ inteiro fora do escopo (ADR-008 cobre).
+    agrupar siblings (dirs e arquivos) por name.lower(); grupos com >= 2 nomes são
+    case-duplicates. Proton Drive é case-insensitive — qualquer par no mesmo dirpath
+    colide em Path2 independente de ser dir ou arquivo. Skip silente em git_handling
+    bundle|skip (não passam por bisync; paridade com ADR-010) OU quando local_path
+    não existe. .git/ inteiro fora do escopo (ADR-008 cobre).
     """
     if folder.git_handling in ("bundle", "skip"):
         return
@@ -186,7 +187,7 @@ def _validate_case_duplicates_against_remote(
 
     collisions: list[tuple[Path, list[str]]] = []
     root = folder.local_path
-    for dirpath, dirnames, _filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
         rel_parts = Path(dirpath).relative_to(root).parts
         if ".git" in rel_parts:
             dirnames.clear()
@@ -195,8 +196,8 @@ def _validate_case_duplicates_against_remote(
             dirnames.clear()
             continue
         groups: dict[str, list[str]] = {}
-        for d in dirnames:
-            groups.setdefault(d.lower(), []).append(d)
+        for name in (*dirnames, *filenames):
+            groups.setdefault(name.lower(), []).append(name)
         for names in groups.values():
             if len(names) >= 2:
                 collisions.append((Path(dirpath), sorted(names)))
