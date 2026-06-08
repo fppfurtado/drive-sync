@@ -168,6 +168,56 @@ def _validate_auto_exclude_against_code(folder: "FolderConfig", max_depth: int) 
     )
 
 
+def _validate_case_duplicates_against_remote(
+    folder: "FolderConfig", max_depth: int
+) -> None:
+    """ADR-011: rejeita case-duplicates Path1↔Path2 quando scan detecta siblings colidindo.
+
+    Walk recursivo até max_depth (reusa git.max_recursion_depth); para cada dirpath,
+    agrupar dirnames por name.lower(); grupos com >= 2 nomes são case-duplicates.
+    Proton Drive é case-insensitive — qualquer par no mesmo dirpath colide em Path2.
+    Skip silente em git_handling bundle|skip (não passam por bisync; paridade com ADR-010)
+    OU quando local_path não existe. .git/ inteiro fora do escopo (ADR-008 cobre).
+    """
+    if folder.git_handling in ("bundle", "skip"):
+        return
+    if not folder.local_path.exists():
+        return
+
+    collisions: list[tuple[Path, list[str]]] = []
+    root = folder.local_path
+    for dirpath, dirnames, _filenames in os.walk(root):
+        rel_parts = Path(dirpath).relative_to(root).parts
+        if ".git" in rel_parts:
+            dirnames.clear()
+            continue
+        if len(rel_parts) >= max_depth:
+            dirnames.clear()
+            continue
+        groups: dict[str, list[str]] = {}
+        for d in dirnames:
+            groups.setdefault(d.lower(), []).append(d)
+        for names in groups.values():
+            if len(names) >= 2:
+                collisions.append((Path(dirpath), sorted(names)))
+
+    if not collisions:
+        return
+
+    bullets = "\n".join(
+        f"  - {' ↔ '.join(str(parent / n) for n in names)}"
+        for parent, names in collisions
+    )
+    raise ValueError(
+        f"case-duplicates detectados em {folder.name!r} (Path1={folder.local_path}): "
+        f"Proton Drive é case-insensitive e trata cada par como mesma entry, "
+        f"causando rclone safety abort (rc=7).\n\n"
+        f"{bullets}\n\n"
+        f"Cleanup é responsabilidade do operador (FS surgery). Decida rename, "
+        f"merge ou delete por par; re-execute `--check`."
+    )
+
+
 def _validate_repo_subpath_overlap(
     parent_name: str,
     repo_overrides: list["RepoOverride"],
@@ -402,6 +452,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         )
         folders.append(parent)
         _validate_auto_exclude_against_code(parent, git_max_recursion_depth)
+        _validate_case_duplicates_against_remote(parent, git_max_recursion_depth)
 
         # Ordem load-bearing: clone do exclude (em _expand_synthetic_folder)
         # acontece ANTES do append do glob no parent — synthetic não exclui a si mesmo.
