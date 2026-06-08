@@ -20,7 +20,7 @@ Cleanup case-duplicates é **responsabilidade do operador** (FS surgery cirúrgi
 
 ## Decisão
 
-Adicionar validador config-time `_validate_case_duplicates_against_remote(folder, max_depth)` em [`drive_sync/config.py`](../../drive_sync/config.py) análogo a `_validate_auto_exclude_against_code` (ADR-010). `drive-sync --check` rejeita com fatal-error quando o scan recursivo de `folder.local_path` (depth = `cfg.git.max_recursion_depth`, default 6) detecta siblings com colisão case-insensitive (`name.lower()` repetido entre dirs sob o mesmo `dirpath`).
+Adicionar validador config-time `_validate_case_duplicates_against_remote(folder, max_depth)` em [`drive_sync/config.py`](../../drive_sync/config.py) análogo a `_validate_auto_exclude_against_code` (ADR-010). `drive-sync --check` rejeita com fatal-error quando o scan recursivo de `folder.local_path` (depth = `cfg.git.max_recursion_depth`, default 6) detecta siblings com colisão case-insensitive (`name.lower()` repetido entre **dirs e arquivos** sob o mesmo `dirpath` — Proton Drive trata os dois como mesma entry; qualquer sibling colidindo dispara rc=7, independente de ser pasta ou arquivo).
 
 Razões:
 
