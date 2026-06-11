@@ -58,6 +58,44 @@ _AUTH_ENDPOINT_RE = re.compile(r"(?:/api)?/auth/v4")
 # Re-extrai (code, status) do match já validado, para lookup do kind em _AUTH_CODES.
 _AUTH_PAIR_RE = re.compile(r"Code=(\d+),\s*Status=(\d+)")
 
+# ADR-012: captura completa de stderr per call-site em ~/.local/state/drive-sync/
+# substituindo o tail-truncate `err.strip()[-N:]` que ocultava causa-raiz.
+_FIRST_ERROR_RE = re.compile(r"^.*ERROR\s*:\s*(.+)$", re.MULTILINE)
+_SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _stderr_dir() -> Path:
+    """Diretório XDG state onde escrevemos last-stderr-*.log."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    p = Path(base) / "drive-sync"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _slug(value: str) -> str:
+    """Sanitiza folder.name / rel_subpath para uso seguro em filename."""
+    return _SAFE_SLUG_RE.sub("_", value)
+
+
+def _capture_stderr(
+    op: str, folder_name: str, stderr: str, *, sub: str | None = None
+) -> tuple[str, Path]:
+    """Escreve stderr completo em arquivo per call-site e retorna (summary, path).
+
+    `summary` = primeiro match `_FIRST_ERROR_RE.group(0)` se houver, senão
+    `stderr.strip()[-500:]` (fallback ao comportamento legado pré-ADR-012).
+    """
+    folder_slug = _slug(folder_name)
+    if sub is not None:
+        filename = f"last-stderr-{op}-{folder_slug}-{_slug(sub)}.log"
+    else:
+        filename = f"last-stderr-{op}-{folder_slug}.log"
+    path = _stderr_dir() / filename
+    path.write_text(stderr)
+    match = _FIRST_ERROR_RE.search(stderr)
+    summary = match.group(0) if match else stderr.strip()[-500:]
+    return summary, path
+
 
 class AuthDegradedError(RuntimeError):
     """Levantada por `_run` quando o stderr do rclone indica falha de auth conhecida.
@@ -178,7 +216,11 @@ class RcloneEngine:
         cmd = [self.app.rclone.binary, "mkdir", remote]
         rc, _out, err = await _run(cmd)
         if rc != 0:
-            log.error("[%s] Falha ao criar diretório remoto %s: %s", name, remote, err.strip()[-300:])
+            summary, path = _capture_stderr("mkdir", name, err)
+            log.error(
+                "[%s] [MKDIR_FAIL] %s: %s (full stderr: %s)",
+                name, remote, summary, path,
+            )
             return False
         log.debug("[%s] Diretório remoto garantido: %s", name, remote)
         return True
@@ -238,7 +280,11 @@ class RcloneEngine:
 
         rc, _out, err = await _run(cmd)
         if rc != 0:
-            log.error("[%s] bisync falhou (rc=%d): %s", folder.name, rc, err.strip()[-500:])
+            summary, path = _capture_stderr("bisync", folder.name, err)
+            log.error(
+                "[%s] [BISYNC_FAIL] rc=%d: %s (full stderr: %s)",
+                folder.name, rc, summary, path,
+            )
             # Em alguns erros, o rclone sugere `--resync` para recuperar.
             # Não invocamos automaticamente para não causar perda de dados;
             # apenas registramos com nível ERROR.
@@ -261,7 +307,13 @@ class RcloneEngine:
         cmd = self._base_cmd() + ["copyto", str(bundle), remote, "--update"]
         rc, _o, err = await _run(cmd)
         if rc != 0:
-            log.error("Falha ao subir bundle %s → %s: %s", bundle, remote, err.strip()[-300:])
+            summary, path = _capture_stderr(
+                "upload-bundle", folder.name, err, sub=rel_subpath
+            )
+            log.error(
+                "[%s] [BUNDLE_UPLOAD_FAIL] %s → %s: %s (full stderr: %s)",
+                folder.name, bundle, remote, summary, path,
+            )
             return False
         log.info("Bundle sincronizado para nuvem: %s", remote)
         return True
@@ -284,6 +336,12 @@ class RcloneEngine:
             if "not found" in err.lower():
                 log.debug("Bundle remoto inexistente em %s — nada a baixar.", remote)
                 return True
-            log.error("Falha ao baixar bundle %s: %s", remote, err.strip()[-300:])
+            summary, path = _capture_stderr(
+                "download-bundle", folder.name, err, sub=rel_subpath
+            )
+            log.error(
+                "[%s] [BUNDLE_DOWNLOAD_FAIL] %s: %s (full stderr: %s)",
+                folder.name, remote, summary, path,
+            )
             return False
         return True
