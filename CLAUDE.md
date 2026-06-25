@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Constelação:** este repo é um nó da constelação pessoal do operador (hub: [`meta-system`](https://github.com/fppfurtado/meta-system)). Pertencimento + relações cross-repo em [`catalog-info.yaml`](catalog-info.yaml).
+
 ## Overview
 
 `drive-sync` is a Python daemon that performs bidirectional sync of local folders with Proton Drive on Linux, using `rclone bisync` for transfer, `watchdog` (inotify) for change detection, and `systemd --user` for auto-start. The project exists because Proton has no native Linux sync client yet (planned for 2026).

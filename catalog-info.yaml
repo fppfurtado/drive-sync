@@ -1,0 +1,17 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: drive-sync
+  annotations:
+    constelacao.io/cluster: env-stack
+    constelacao.io/camada: substrate
+    constelacao.io/hub: github:fppfurtado/meta-system
+    constelacao.io/edges: |
+      [{"to": "component:default/pragmatic-dev-toolkit", "edgeType": "cc-plugin"}]
+spec:
+  type: service
+  lifecycle: production
+  owner: fppfurtado
+  system: env-stack
+  dependsOn:
+    - component:default/pragmatic-dev-toolkit
