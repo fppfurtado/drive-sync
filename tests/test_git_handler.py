@@ -203,3 +203,67 @@ def test_is_linked_worktree_false_for_non_repo_and_malformed(tmp_path):
     weird.mkdir()
     (weird / ".git").write_text("not a gitdir line\n")
     assert is_linked_worktree(weird) is False
+
+
+# ---------------------------------------------------------------------------
+# Snapshot/bundle em repo sem HEAD (#27) — index temporário vazio
+# ---------------------------------------------------------------------------
+
+def _init_commitless_repo_with_files(path):
+    """git init + arquivos NO worktree, zero commits — o shape do incidente quill."""
+    import subprocess
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], capture_output=True, check=True)
+    (path / "README.md").write_text("# conteúdo sem commit")
+    (path / "docs").mkdir()
+    (path / "docs" / "a.md").write_text("a")
+
+
+def test_snapshot_succeeds_on_commitless_repo(tmp_path):
+    """Repo sem HEAD: add -A não pode tropeçar no index temp vazio (#27)."""
+    from drive_sync.git_handler import _create_worktree_snapshot, _delete_snapshot_refs
+    repo = tmp_path / "quill"
+    _init_commitless_repo_with_files(repo)
+
+    assert _create_worktree_snapshot(repo) is True
+    _delete_snapshot_refs(repo)
+
+
+def test_create_bundle_succeeds_on_commitless_repo(tmp_path):
+    """Bundle snapshot-only de repo sem commits — conteúdo local-only ganha backup."""
+    from drive_sync.git_handler import create_bundle, restore_from_bundle
+    import subprocess
+    repo = tmp_path / "quill"
+    _init_commitless_repo_with_files(repo)
+    dest = tmp_path / "quill.gitbundle"
+
+    assert create_bundle(repo, dest, bundle_all=True) is True
+    assert dest.exists() and dest.stat().st_size > 0
+
+    # Round-trip: restaura o conteúdo num clone vazio a partir do bundle.
+    target = tmp_path / "restored"
+    target.mkdir()
+    subprocess.run(["git", "init", str(target)], capture_output=True, check=True)
+    restore_from_bundle(dest, target)
+    assert (target / "README.md").read_text() == "# conteúdo sem commit"
+    assert (target / "docs" / "a.md").read_text() == "a"
+
+
+def test_create_bundle_empty_repo_yields_empty_snapshot_bundle(tmp_path):
+    """Sem commits E sem arquivos: snapshot de tree vazia → bundle válido (True).
+
+    Comportamento novo pós-#27 (antes: False, que envenenava o success agregado
+    do folder no modo auto para sempre). Bundle de tree vazia é minúsculo e
+    inócuo; o retorno True preserva o success signal honesto.
+    """
+    from drive_sync.git_handler import create_bundle
+    import subprocess
+    repo = tmp_path / "vazio"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], capture_output=True, check=True)
+    dest = tmp_path / "vazio.gitbundle"
+
+    assert create_bundle(repo, dest) is True
+    assert dest.exists()
