@@ -131,8 +131,13 @@ def test_repo_init_no_head_returns_bundle_silently(tmp_path):
     assert c.reason == "no_remote"
 
 
-def test_git_file_worktree_inherits_remote(tmp_path):
-    """Worktree (`.git` é arquivo) — git remote -v delega ao repo principal."""
+def test_git_file_worktree_is_structural_skip(tmp_path):
+    """Worktree linkada → skip estrutural (linked_worktree), sem consultar remote (#24).
+
+    Antes o skip vinha do proxy has_remote (worktree herda remote do principal);
+    agora é estrutural — vale também para worktree de repo local-only, e segue
+    gerando --exclude no bisync (invariante ADR-008 preservado).
+    """
     main_repo = tmp_path / "main"
     _init_repo(main_repo)
     _add_remote(main_repo, url="git@github.com:owner/main.git")
@@ -151,7 +156,39 @@ def test_git_file_worktree_inherits_remote(tmp_path):
     branch_class = next((c for c in classifications if c.repo_subpath == "branch"), None)
     assert branch_class is not None
     assert branch_class.mode == "skip"
-    assert branch_class.remote_url == "git@github.com:owner/main.git"
+    assert branch_class.reason == "linked_worktree"
+
+
+def test_worktree_of_local_only_repo_is_not_bundled(tmp_path):
+    """Worktree de repo SEM remote não vira bundle — história já está no principal (#24)."""
+    main_repo = tmp_path / "container" / "main"
+    _init_repo(main_repo)  # sem remote
+
+    wt = tmp_path / "container" / "wt-feature"
+    subprocess.run(
+        ["git", "-C", str(main_repo), "worktree", "add", str(wt)],
+        capture_output=True, check=True,
+    )
+
+    folder = _folder(tmp_path / "container")
+    classifications = classify_repos(folder, _git_cfg())
+    by_subpath = {c.repo_subpath: c for c in classifications}
+    assert by_subpath["main"].mode == "bundle"           # principal segue coberto
+    assert by_subpath["wt-feature"].mode == "skip"
+    assert by_subpath["wt-feature"].reason == "linked_worktree"
+
+
+def test_submodule_shaped_git_file_classifies_normally(tmp_path):
+    """`.git` arquivo com gitdir → modules/ (shape submodule) NÃO é worktree — classifica normal."""
+    sub = tmp_path / "container" / "sub"
+    sub.mkdir(parents=True)
+    (sub / ".git").write_text("gitdir: ../.git/modules/sub\n")
+
+    folder = _folder(tmp_path / "container")
+    classifications = classify_repos(folder, _git_cfg())
+    sub_class = next((c for c in classifications if c.repo_subpath == "sub"), None)
+    assert sub_class is not None
+    assert sub_class.reason != "linked_worktree"
 
 
 def test_folder_local_path_is_itself_repo(tmp_path):
