@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **Constelação:** este repo é um nó da constelação pessoal do operador (hub: [`meta-system`](https://github.com/fppfurtado/meta-system)). Pertencimento + relações cross-repo em [`catalog-info.yaml`](catalog-info.yaml).
 
+> A mneme é o KB soberano do operador (instância `~/mneme`). Quando a tarefa se beneficia de contexto/decisões prévias do ecossistema, consulte on-demand: `mneme index rebuild >/dev/null && mneme ground --query "<tema>" --json` (cada item vem com `trust`; `não-verificado` é status, não defeito).
+
 ## Overview
 
 `drive-sync` is a Python daemon that performs bidirectional sync of local folders with Proton Drive on Linux, using `rclone bisync` for transfer, `watchdog` (inotify) for change detection, and `systemd --user` for auto-start. The project exists because Proton has no native Linux sync client yet (planned for 2026).
