@@ -164,3 +164,42 @@ def test_last_modified_increases_after_new_file(tmp_path):
     (tmp_path / "repo" / "new_file.txt").write_text("hello")
     after = worktree_last_modified(tmp_path / "repo")
     assert after >= before
+
+
+# ---------------------------------------------------------------------------
+# is_linked_worktree (#24)
+# ---------------------------------------------------------------------------
+
+def test_is_linked_worktree_true_for_real_worktree(tmp_path):
+    from drive_sync.git_handler import is_linked_worktree
+    import subprocess
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", str(main)], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "config", "user.email", "t@t"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "config", "user.name", "t"], capture_output=True, check=True)
+    (main / "f").write_text("x")
+    subprocess.run(["git", "-C", str(main), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "commit", "-m", "i"], capture_output=True, check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", str(main), "worktree", "add", str(wt)], capture_output=True, check=True)
+
+    assert is_linked_worktree(wt) is True
+    assert is_linked_worktree(main) is False
+
+
+def test_is_linked_worktree_false_for_submodule_shape(tmp_path):
+    from drive_sync.git_handler import is_linked_worktree
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".git").write_text("gitdir: ../.git/modules/sub\n")
+    assert is_linked_worktree(sub) is False
+
+
+def test_is_linked_worktree_false_for_non_repo_and_malformed(tmp_path):
+    from drive_sync.git_handler import is_linked_worktree
+    assert is_linked_worktree(tmp_path) is False
+    weird = tmp_path / "weird"
+    weird.mkdir()
+    (weird / ".git").write_text("not a gitdir line\n")
+    assert is_linked_worktree(weird) is False

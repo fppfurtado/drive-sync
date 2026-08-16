@@ -635,3 +635,36 @@ async def test_cooldown_gates_periodic_full_sync():
 
     daemon.engine.bisync_folder.assert_not_called()
     assert folder.name in daemon._cooldown_scheduled
+
+
+# ---------------------------------------------------------------------------
+# _sync_git_folder — worktrees linkadas fora do bundling (#24)
+# ---------------------------------------------------------------------------
+
+async def test_sync_git_folder_skips_linked_worktrees(tmp_path):
+    import subprocess
+    from unittest.mock import AsyncMock
+
+    main = tmp_path / "container" / "main"
+    main.mkdir(parents=True)
+    subprocess.run(["git", "init", str(main)], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "config", "user.email", "t@t"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "config", "user.name", "t"], capture_output=True, check=True)
+    (main / "f").write_text("x")
+    subprocess.run(["git", "-C", str(main), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "commit", "-m", "i"], capture_output=True, check=True)
+    wt = tmp_path / "container" / "wt-feature"
+    subprocess.run(["git", "-C", str(main), "worktree", "add", str(wt)], capture_output=True, check=True)
+
+    folder = FolderConfig(
+        name="c", local_path=tmp_path / "container", remote_subpath="c",
+        git_handling="bundle",
+    )
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon._bundle_single_repo = AsyncMock(return_value=True)
+
+    await daemon._sync_git_folder(folder)
+
+    bundled = [call.args[1] for call in daemon._bundle_single_repo.call_args_list]
+    assert main in bundled
+    assert wt not in bundled

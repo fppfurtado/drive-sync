@@ -86,7 +86,10 @@ def classify_repos(
     - com remote → mode=skip, reason=has_remote (URL capturada pra log)
     - match em folder.repo_overrides → mode=override.mode, reason=override (precedência total)
     - repo sem HEAD: classifica normal (bundle/skip per remote); create_bundle no-op silente
-    - `.git` arquivo (worktree/submodule): delega ao superproject naturalmente
+    - worktree linkada → mode=skip, reason=linked_worktree (estrutural, sem consultar
+      remote — história vive no repo principal; #24). Segue virando --exclude no bisync
+      (invariante ADR-008: repo git nunca é bisyncado). Submodule (.git arquivo com
+      gitdir → modules/) classifica normal
 
     Não chama Notifier nem persiste estado — caller (daemon) gerencia flip detection.
     """
@@ -113,6 +116,17 @@ def classify_repos(
             classifications.append(RepoClassification(
                 repo_path=repo, repo_subpath=repo_subpath,
                 mode=mode, reason="override", remote_url=remote_url,
+            ))
+            continue
+
+        if is_linked_worktree(repo):
+            log.info(
+                "[%s] [REPO_SKIP] %s (linked_worktree)",
+                folder.name, repo_subpath or "<root>",
+            )
+            classifications.append(RepoClassification(
+                repo_path=repo, repo_subpath=repo_subpath,
+                mode="skip", reason="linked_worktree", remote_url=None,
             ))
             continue
 
@@ -169,6 +183,29 @@ def detect_repo_mode_flips(
 def is_git_repo(path: Path) -> bool:
     """Verifica se `path` é a raiz de um repositório Git (tem .git)."""
     return (path / ".git").exists()
+
+
+def is_linked_worktree(path: Path) -> bool:
+    """True se `path` é worktree linkada (`.git` ARQUIVO com gitdir → .git/worktrees/<n>).
+
+    Worktree não é repo autônomo: branches/história vivem no repo principal —
+    o bundle do principal já captura os refs; bundlá-la é duplicação GB-escala
+    de estado efêmero (#24). Submodule também usa `.git` arquivo, mas com
+    gitdir → .git/modules/<n> — retorna False (conteúdo não vive no
+    superproject, segue elegível a bundle).
+    """
+    gitfile = path / ".git"
+    if not gitfile.is_file():
+        return False
+    try:
+        content = gitfile.read_text(errors="replace")
+    except OSError:
+        return False
+    for line in content.splitlines():
+        if line.startswith("gitdir:"):
+            parts = Path(line.split(":", 1)[1].strip()).parts
+            return len(parts) >= 3 and parts[-2] == "worktrees" and parts[-3] == ".git"
+    return False
 
 
 def find_git_repos(root: Path, max_depth: int) -> list[Path]:

@@ -81,6 +81,8 @@ Substitui `git_mode` legado ([ADR-008](docs/decisions/ADR-008-abandonar-bisync-r
 
 **Caveat repo-em-repo:** se `folder.local_path` é ele próprio um repo E contém sub-repos aninhados, ambos são classificados separadamente — bundle do root captura conteúdo dos sub-repos como diretórios normais, sub-repos individuais também recebem bundle próprio (dupla cobertura). Configuração rara; aceita como trade-off conhecido.
 
+**Worktrees linkadas ficam fora do bundling** (#24): `.git` ARQUIVO com `gitdir → .git/worktrees/<n>` → `classify_repos` classifica `skip` estrutural (reason `linked_worktree`, sem consultar remote — segue virando `--exclude` no bisync, invariante ADR-008 preservado) e `_sync_git_folder` (modo `bundle` folder-level) filtra do bundling. Racional: história/branches vivem no repo principal (bundle do principal já captura os refs); bundle de worktree é duplicação GB-escala de estado efêmero. Submodule (`gitdir → .git/modules/<n>`) NÃO é afetado. `repo_overrides` mantém precedência total (força bundle de worktree se o operador quiser).
+
 **Flip detection:** estado in-memory `_last_classification: dict[folder_name, dict[repo_subpath, mode]]`; mudança de mode entre ciclos dispara log `[REPO_MODE_FLIP]` (WARNING) + `Notifier.repo_mode_flip` (notify-send). Primeiro ciclo pós-restart silencioso (estado vazio).
 
 **Migração de config:** `git_mode` em qualquer valor (`bisync|bundle|off`) é rejeitado pelo loader (falha-fast simétrica). Playbook completo em [docs/operations/playbook-flip-git-handling.md](docs/operations/playbook-flip-git-handling.md).

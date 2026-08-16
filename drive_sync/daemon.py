@@ -176,7 +176,7 @@ class SyncDaemon:
 
         Modo `auto` usa _bundle_single_repo direto a partir da classificação.
         """
-        from .git_handler import find_git_repos, is_git_repo
+        from .git_handler import find_git_repos, is_git_repo, is_linked_worktree
 
         root = folder.local_path
         # Quando a pasta-raiz é um repo, ela própria entra na lista; quando não,
@@ -186,6 +186,16 @@ class SyncDaemon:
             repos = find_git_repos(root, self.cfg.git.max_recursion_depth)
         elif is_git_repo(root):
             repos = [root]
+
+        # Worktrees linkadas fora do bundling (#24): história já vive no repo
+        # principal; bundlá-las duplica GB-escala de estado efêmero.
+        for repo in repos:
+            if is_linked_worktree(repo):
+                log.info(
+                    "[%s] [REPO_SKIP] %s (linked_worktree)",
+                    folder.name, repo.relative_to(root) if repo != root else "<root>",
+                )
+        repos = [r for r in repos if not is_linked_worktree(r)]
 
         if not repos:
             log.info("[%s] Sem repos Git aqui — caindo no fluxo bisync comum.", folder.name)
