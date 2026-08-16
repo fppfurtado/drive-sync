@@ -21,7 +21,7 @@ from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
 from .notifier import Notifier
 from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
-from .watcher import FilesystemWatcher
+from .watcher import FilesystemWatcher, WatchLimitError
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ class SyncDaemon:
         self._last_classification: dict[str, dict[str, str]] = {}
         # Resolvido em start():
         self._watcher: FilesystemWatcher | None = None
+        # Degrade poll-only (#20): watcher indisponível por esgotamento inotify.
+        # Workers e periodic full-sync seguem; só a detecção em tempo real cai.
+        self._watcher_degraded_reason: str | None = None
 
     def _enter_degraded(self, reason: str) -> None:
         """Transiciona para estado degraded — idempotente.
@@ -317,14 +320,17 @@ class SyncDaemon:
         await self.queue.put(folder_name)
 
     def _compose_status_payload(self) -> str:
-        """Compõe STATUS sd_notify com precedência auth > folder (ADR-005)."""
+        """Compõe STATUS sd_notify com precedência auth > watcher > folder (ADR-005, #20)."""
         if self._degraded.is_set():
             return f"STATUS=degraded: {self._degraded_reason}"
-        if self._degraded_folders:
-            ordered = ", ".join(
-                f"{name} ({self._degraded_folders[name]})"
-                for name in sorted(self._degraded_folders)
-            )
+        ordered = ", ".join(
+            f"{name} ({self._degraded_folders[name]})"
+            for name in sorted(self._degraded_folders)
+        )
+        if self._watcher_degraded_reason:
+            suffix = f"; folders: {ordered}" if ordered else ""
+            return f"STATUS=degraded: {self._watcher_degraded_reason}{suffix}"
+        if ordered:
             return f"STATUS=degraded folders: {ordered}"
         return "STATUS="
 
@@ -369,6 +375,7 @@ class SyncDaemon:
                 pass
             if self._degraded.is_set():
                 continue
+            self._check_watcher_liveness()
             self._check_folder_staleness()
             log.info("Sincronização periódica de rede de segurança disparada.")
             for f in self.cfg.folders:
@@ -396,9 +403,75 @@ class SyncDaemon:
             except AuthDegradedError as exc:
                 self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
 
+    def _check_watcher_liveness(self) -> None:
+        """Watcher morto em runtime degrada para poll-only com sinal (#20/ADR-013).
+
+        watchdog engole falhas de watch em runtime (contextlib.suppress em
+        adds recursivos) e um emitter pode morrer sem notificar o Observer —
+        sem este probe o daemon acreditaria ter detecção em tempo real que
+        já não existe. Piggyback no periodic (mesmo padrão de ADR-005).
+        """
+        if self._watcher is None:
+            return
+        obs = self._watcher.observer
+        if obs.is_alive() and all(e.is_alive() for e in obs.emitters):
+            return
+        watcher = self._watcher
+        self._watcher = None
+        try:
+            watcher.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("stop do watcher morto falhou: %s", exc)
+        self._watcher_degraded_reason = (
+            f"watcher morreu em runtime — poll-only a cada "
+            f"{self.cfg.watcher.periodic_full_sync_seconds}s"
+        )
+        self._notifier.watcher_degraded(self._watcher_degraded_reason)
+        self._notifier.send_status(self._compose_status_payload())
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+    def _ensure_local_paths(self) -> None:
+        """Materializa local_paths ausentes — setup do daemon, não do watcher.
+
+        Compartilhado pelos dois modos (com watcher e poll-only): no degrade
+        o watcher não sobe, e uma pasta ausente em modo bundle/skip marcaria
+        sucesso sincronizando nada, invisível ao staleness ADR-005.
+        """
+        for f in self.cfg.folders:
+            if f.enabled and not f.local_path.exists():
+                log.warning("Pasta %s (%s) não existe; criando.", f.name, f.local_path)
+                f.local_path.mkdir(parents=True, exist_ok=True)
+
+    def _start_watcher(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Sobe o watcher; em esgotamento inotify degrada para poll-only (#20).
+
+        Sem watcher, todo sync passa a depender do periodic full-sync — por
+        isso o degrade exige `periodic_full_sync_seconds > 0`; sem ele o
+        daemon seria um no-op silencioso, e aí o esgotamento continua fatal
+        (mensagem actionable, sem crash-loop mudo).
+        """
+        self._watcher = FilesystemWatcher(self.cfg, loop, self.queue)
+        try:
+            self._watcher.start()
+        except WatchLimitError as exc:
+            self._watcher = None
+            interval = self.cfg.watcher.periodic_full_sync_seconds
+            if interval <= 0:
+                log.critical(
+                    "Watcher indisponível (%s) e periodic_full_sync_seconds <= 0 — "
+                    "sem mecanismo de sync restante. Aumente fs.inotify.max_user_watches "
+                    "ou habilite watcher.periodic_full_sync_seconds para poll-only.",
+                    exc,
+                )
+                raise
+            self._watcher_degraded_reason = (
+                f"watcher off ({exc}) — poll-only a cada {interval}s"
+            )
+            self._notifier.watcher_degraded(self._watcher_degraded_reason)
+            self._notifier.send_status(self._compose_status_payload())
+
     async def run(self) -> None:
         # Atraso inicial dá tempo da rede subir (NetworkManager pós-boot).
         if self.cfg.watcher.startup_delay_seconds > 0:
@@ -411,8 +484,8 @@ class SyncDaemon:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._stop_event.set)
 
-        self._watcher = FilesystemWatcher(self.cfg, loop, self.queue)
-        self._watcher.start()
+        self._ensure_local_paths()
+        self._start_watcher(loop)
 
         # Sync inicial de todas as pastas.
         for f in self.cfg.folders:

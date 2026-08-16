@@ -31,6 +31,14 @@ class Notifier:
         log.critical("[FOLDER_DEGRADED] %s: %s", folder, reason)
         self._notify_send(f"drive-sync — {folder} degraded", reason)
 
+    def watcher_degraded(self, reason: str) -> None:
+        """Sinaliza watcher desligado por esgotamento inotify — poll-only (#20).
+
+        STATUS agregada é responsabilidade do daemon (mesmo padrão de ADR-005).
+        """
+        log.critical("[WATCHER_DEGRADED] %s", reason)
+        self._notify_send("drive-sync — watcher degraded", reason)
+
     def repo_mode_flip(self, folder: str, repo_subpath: str, old_mode: str, new_mode: str) -> None:
         """Sinaliza flip de mode em repo descoberto (ADR-008).
 

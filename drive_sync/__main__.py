@@ -10,6 +10,7 @@ from .config import default_config_path, load_config
 from .daemon import SyncDaemon
 from .logging_setup import setup_logging
 from .status import render_status
+from .watcher import WatchLimitError
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -80,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(daemon.run())
     except KeyboardInterrupt:
         log.info("Interrompido pelo usuário.")
+    except WatchLimitError as exc:
+        # Fatal deliberado (ADR-013): esgotamento inotify SEM periodic
+        # full-sync habilitado — sai limpo, sem traceback no journal.
+        log.critical("Encerrando: %s", exc)
+        return 1
     return 0
 
 
