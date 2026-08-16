@@ -62,13 +62,12 @@ rclone purge proton:Sync/dev/scripts/
 
 ## Ordem para folders sem repo local-only
 
-Folders cujos repos todos têm remote no GitHub (`dev-projects`, `dotfiles`, `notes/logseq`) — purge direto antes da edição é seguro (GitHub é o backup).
+Folders cujos repos todos têm remote no GitHub (`dev-projects`, `dotfiles`) — purge direto antes da edição é seguro (GitHub é o backup).
 
 ```bash
 # 1. Purgar paths bisync-only.
 rclone purge proton:Sync/dev/projects/
 rclone purge proton:Sync/dotfiles/
-rclone purge proton:Sync/notes/logseq/
 
 # 2. Invalidar markers bisync do drive-sync (PASSO CRÍTICO).
 #    Sem isso, daemon não dispara `--resync` no próximo ciclo e rclone bisync
