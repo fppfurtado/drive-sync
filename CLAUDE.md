@@ -91,7 +91,7 @@ Cada folder pode adicionalmente declarar `subpath_overrides: [{subpath, git_hand
 
 Runtime config: `~/.config/drive-sync/config.yaml` (or `$XDG_CONFIG_HOME/drive-sync/config.yaml`).
 
-The reference config at [config/config.yaml](config/config.yaml) shows the full schema with all available options. Every section except `folders` is optional and has defaults in the dataclasses.
+The reference config at [config/config.yaml.example](config/config.yaml.example) shows the full schema with all available options. Every section except `folders` is optional and has defaults in the dataclasses.
 
 ## Key Paths (Runtime)
 
