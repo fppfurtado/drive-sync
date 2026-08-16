@@ -40,6 +40,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Imprime snapshot do estado das pastas (último sync, inicialização) e sai.",
     )
+    mode.add_argument(
+        "--watchdog",
+        action="store_true",
+        help="Dead-man's-switch externo (ADR-014): checa serviço/STATUS/markers, "
+             "alerta via notify-send e sai (0 saudável, 1 problemas).",
+    )
     return p
 
 
@@ -71,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         print("Configuração OK.")
         return 0
+
+    if args.watchdog:
+        from .watchdog import run_watchdog
+        return run_watchdog(cfg)
 
     daemon = SyncDaemon(cfg)
 

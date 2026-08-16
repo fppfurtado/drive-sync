@@ -39,6 +39,15 @@ class Notifier:
         log.critical("[WATCHER_DEGRADED] %s", reason)
         self._notify_send("drive-sync — watcher degraded", reason)
 
+    def watchdog_alert(self, summary: str) -> None:
+        """Alerta do watchdog externo (#19/ADR-014) — re-emitido a cada ciclo com problema.
+
+        Sem sd_notify: o watchdog é processo/unit próprio, não o MainPID do daemon
+        (NotifyAccess=main o rejeitaria); o journal da unit oneshot é a superfície.
+        """
+        log.critical("[WATCHDOG_ALERT] %s", summary)
+        self._notify_send("drive-sync watchdog", summary)
+
     def repo_mode_flip(self, folder: str, repo_subpath: str, old_mode: str, new_mode: str) -> None:
         """Sinaliza flip de mode em repo descoberto (ADR-008).
 
