@@ -298,6 +298,10 @@ def _create_worktree_snapshot(repo: Path) -> bool:
     env = os.environ.copy()
     tmp_index = tempfile.NamedTemporaryFile(prefix="proton-snap-idx-", delete=False)
     tmp_index.close()
+    # Git rejeita index EXISTENTE vazio ("index file smaller than expected") —
+    # em repo sem HEAD nada escreve o index antes do `add -A` e o snapshot
+    # falhava (#27). Path inexistente faz o git criar index fresco.
+    os.unlink(tmp_index.name)
     env["GIT_INDEX_FILE"] = tmp_index.name
 
     try:
@@ -395,8 +399,9 @@ def create_bundle(repo: Path, dest: Path, bundle_all: bool = True) -> bool:
     """Cria/atualiza um bundle do repositório, capturando o worktree atual.
 
     O bundle inclui --all (todo o histórico) + refs/drive-sync/*
-    (snapshot do worktree). Repositórios sem nenhum commit E sem arquivos
-    são pulados.
+    (snapshot do worktree). Repo sem commits gera bundle snapshot-only
+    (tree vazia se o worktree estiver vazio) — retornar False aqui
+    envenenaria o success agregado do folder no modo auto (#27).
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -426,7 +431,11 @@ def create_bundle(repo: Path, dest: Path, bundle_all: bool = True) -> bool:
         refs_args.append("--all")
     if has_snapshot:
         refs_args.append(SNAPSHOT_REF)
-        refs_args.append(HEAD_MARKER_REF)
+        # HEAD_MARKER_REF só existe quando o snapshot tinha HEAD de origem
+        # (passo 6 do _create_worktree_snapshot) — referenciá-la em repo sem
+        # HEAD abortava o bundle ("unknown revision", #27).
+        if head_check.returncode == 0:
+            refs_args.append(HEAD_MARKER_REF)
     if not refs_args:
         # Repo sem HEAD mas com snapshot — só o snapshot.
         refs_args = [SNAPSHOT_REF]
@@ -575,6 +584,9 @@ def _apply_snapshot_if_present(repo: Path, fresh_clone: bool) -> None:
     env = os.environ.copy()
     tmp_index = tempfile.NamedTemporaryFile(prefix="proton-restore-idx-", delete=False)
     tmp_index.close()
+    # Mesmo racional do snapshot (#27): index existente vazio é rejeitado pelo
+    # git; path inexistente → index fresco no read-tree.
+    os.unlink(tmp_index.name)
     env["GIT_INDEX_FILE"] = tmp_index.name
 
     try:
