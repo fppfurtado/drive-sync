@@ -1,0 +1,12 @@
+[Unit]
+Description=Timer do dead-man's-switch do drive-sync (ADR-014)
+
+[Timer]
+# 5min após boot/login, depois a cada 30min. Persistent dispara no resume
+# (alerta falso pós-suspend longo é aceito e documentado — ADR-014 §Limitações).
+OnStartupSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

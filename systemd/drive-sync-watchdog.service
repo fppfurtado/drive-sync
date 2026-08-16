@@ -1,0 +1,9 @@
+[Unit]
+Description=Dead-man's-switch do drive-sync (ADR-014) — alerta se o backup silenciar
+Documentation=https://github.com/fppfurtado/drive-sync
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/drive-sync --watchdog
+# exit 1 quando há problemas → unit failed → visível em systemctl --user --failed
+# (terceira superfície de sinal, além do notify-send e do journal).
