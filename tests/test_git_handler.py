@@ -267,3 +267,24 @@ def test_create_bundle_empty_repo_yields_empty_snapshot_bundle(tmp_path):
 
     assert create_bundle(repo, dest) is True
     assert dest.exists()
+
+
+def test_find_git_repos_does_not_descend_into_linked_worktree(tmp_path):
+    """Worktree entra na lista (p/ --exclude do auto) mas o subtree não é varrido (#30)."""
+    import subprocess
+    from drive_sync.git_handler import find_git_repos
+    main = tmp_path / "main"
+    _init_commitless_repo_with_files(main)
+    subprocess.run(["git", "-C", str(main), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(main), "commit", "-m", "i"], capture_output=True, check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", str(main), "worktree", "add", str(wt)], capture_output=True, check=True)
+    nested = wt / "nested-repo"
+    nested.mkdir()
+    subprocess.run(["git", "init", str(nested)], capture_output=True, check=True)
+
+    repos = find_git_repos(tmp_path, max_depth=6)
+
+    assert wt in repos          # a worktree em si segue descoberta
+    assert nested not in repos  # o aninhado dentro dela, não
+    assert main in repos

@@ -221,6 +221,12 @@ def find_git_repos(root: Path, max_depth: int) -> list[Path]:
             return
         if is_git_repo(current):
             repos.append(current)
+            # Worktree linkada: entra na lista (o modo auto precisa dela pro
+            # --exclude — invariante ADR-008), mas SEM descer no subtree (#30):
+            # o exclude dela já cobre tudo abaixo, e descer redescobria repos
+            # aninhados que viravam bundles duplicados por worktree.
+            if is_linked_worktree(current):
+                return
         try:
             for child in current.iterdir():
                 if child.is_dir() and child.name != ".git" and not child.is_symlink():
