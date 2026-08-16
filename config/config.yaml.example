@@ -84,18 +84,6 @@ folders:
     auto_exclude: true
     debounce_seconds: 40
 
-  # ---------- Notes ----------
-  - name: "logseq-vault"
-    local_path: "~/Notes/Logseq"
-    remote_subpath: "notes/logseq"
-    git_handling: "auto"
-    auto_exclude: true
-    debounce_seconds: 40            # Logseq saves aggressively
-    exclude:
-      - "logseq/.recycle/**"
-      - "logseq/bak/**"
-      - "logseq/version-files/**"
-
   # ---------- Documents & media (folders não-git → plain) ----------
   - name: "documents"
     local_path: "~/Documents"
