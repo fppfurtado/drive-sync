@@ -61,3 +61,48 @@ def test_sibling_folders_do_not_cross_match():
     ]
     assert owning_folder(Path("/home/user/alpha/x"), folders).name == "alpha"
     assert owning_folder(Path("/home/user/beta/x"), folders).name == "beta"
+
+
+# ---------------------------------------------------------------------------
+# _DebouncingHandler — eventos de leitura não são mudança (#29)
+# ---------------------------------------------------------------------------
+
+def _make_handler():
+    from unittest.mock import MagicMock
+    from drive_sync.watcher import _DebouncingHandler
+    folder = _folder("a", "/home/user/A")
+    folder.debounce_seconds = 40
+    return _DebouncingHandler(
+        folder=folder, all_folders=[folder],
+        loop=MagicMock(), queue=MagicMock(), dedupe_subpaths=False,
+    )
+
+
+def test_opened_event_is_ignored():
+    from watchdog.events import FileOpenedEvent
+    h = _make_handler()
+    h.on_any_event(FileOpenedEvent("/home/user/A/.git/config"))
+    assert h._timer is None
+
+
+def test_closed_no_write_event_is_ignored():
+    from watchdog.events import FileClosedNoWriteEvent
+    h = _make_handler()
+    h.on_any_event(FileClosedNoWriteEvent("/home/user/A/.git/HEAD"))
+    assert h._timer is None
+
+
+def test_modified_event_schedules_debounce():
+    from watchdog.events import FileModifiedEvent
+    h = _make_handler()
+    h.on_any_event(FileModifiedEvent("/home/user/A/x.txt"))
+    assert h._timer is not None
+    h._timer.cancel()
+
+
+def test_closed_after_write_event_schedules_debounce():
+    from watchdog.events import FileClosedEvent
+    h = _make_handler()
+    h.on_any_event(FileClosedEvent("/home/user/A/x.txt"))
+    assert h._timer is not None
+    h._timer.cancel()

@@ -22,10 +22,18 @@ import logging
 import threading
 from pathlib import Path
 
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.events import (
+    EVENT_TYPE_CLOSED_NO_WRITE,
+    EVENT_TYPE_OPENED,
+    FileSystemEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers import Observer
 
 from .config import AppConfig, FolderConfig
+
+# Eventos que NÃO representam mudança no FS (#29) — filtrados no handler.
+_READ_ONLY_EVENT_TYPES = frozenset({EVENT_TYPE_OPENED, EVENT_TYPE_CLOSED_NO_WRITE})
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +95,12 @@ class _DebouncingHandler(FileSystemEventHandler):
         self._lock = threading.Lock()
 
     def on_any_event(self, event: FileSystemEvent) -> None:
+        # Leituras não são mudança (#29): watchdog >= 4 emite opened/
+        # closed_no_write — as leituras do PRÓPRIO classify (git remote -v,
+        # find_git_repos) retroalimentavam o watcher num loop perpétuo no
+        # ritmo do debounce; qualquer leitor externo (ls, IDE) idem.
+        if event.event_type in _READ_ONLY_EVENT_TYPES:
+            return
         if event.is_directory:
             # Eventos de diretório também contam — criação de pasta vazia
             # é um caso real.
