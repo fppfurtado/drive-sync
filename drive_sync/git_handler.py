@@ -39,7 +39,10 @@ log = logging.getLogger(__name__)
 
 # Refs isoladas usadas para o snapshot do worktree.
 SNAPSHOT_REF = "refs/drive-sync/snapshot"
-HEAD_MARKER_REF = "refs/drive-sync/head-at-snapshot"
+# Ref legada (pré-#17): bundles gerados pelo código antigo ainda carregam este
+# marcador. O restore a apaga defensivamente para não deixar lixo no repo do
+# usuário durante a janela de transição; bundles novos nunca a criam (#17).
+_LEGACY_HEAD_MARKER_REF = "refs/drive-sync/head-at-snapshot"
 
 
 # ---------------------------------------------------------------------------
@@ -369,14 +372,10 @@ def _create_worktree_snapshot(repo: Path) -> bool:
             log.error("update-ref %s falhou em %s: %s", SNAPSHOT_REF, repo, r.stderr.strip())
             return False
 
-        # 6. Marca também onde o HEAD estava no momento do snapshot, para
-        #    que a restauração saiba para onde voltar.
-        if has_head:
-            subprocess.run(
-                ["git", "-C", str(repo), "update-ref", HEAD_MARKER_REF, head_sha],
-                capture_output=True,
-            )
-
+        # Onde o HEAD estava NÃO precisa de ref própria: é o primeiro parent
+        # do commit-snapshot (passo 4: commit-tree -p head_sha). A restauração
+        # o deriva de SNAPSHOT_REF^ — um ref a menos, e some o edge case que
+        # abrigava o 2º bug do #27 (#17).
         return True
     finally:
         try:
@@ -386,12 +385,13 @@ def _create_worktree_snapshot(repo: Path) -> bool:
 
 
 def _delete_snapshot_refs(repo: Path) -> None:
-    """Remove as refs locais usadas pelo snapshot.
+    """Remove as refs internas do snapshot do repo.
 
-    Elas existem só durante a janela de geração do bundle; depois disso
-    são lixo. Vivem dentro do bundle, que é o que importa.
+    A ref do snapshot existe só durante a janela de geração do bundle. A ref
+    legada head-at-snapshot pode vir num bundle antigo (pré-#17) restaurado —
+    apagada defensivamente (`update-ref -d` em ref inexistente é no-op).
     """
-    for ref in (SNAPSHOT_REF, HEAD_MARKER_REF):
+    for ref in (SNAPSHOT_REF, _LEGACY_HEAD_MARKER_REF):
         subprocess.run(
             ["git", "-C", str(repo), "update-ref", "-d", ref],
             capture_output=True,
@@ -436,12 +436,9 @@ def create_bundle(repo: Path, dest: Path, bundle_all: bool = True) -> bool:
     if bundle_all and head_check.returncode == 0:
         refs_args.append("--all")
     if has_snapshot:
+        # O parent do commit-snapshot (head-at-snapshot) viaja no bundle como
+        # ancestral de SNAPSHOT_REF — sem ref dedicada a empacotar (#17).
         refs_args.append(SNAPSHOT_REF)
-        # HEAD_MARKER_REF só existe quando o snapshot tinha HEAD de origem
-        # (passo 6 do _create_worktree_snapshot) — referenciá-la em repo sem
-        # HEAD abortava o bundle ("unknown revision", #27).
-        if head_check.returncode == 0:
-            refs_args.append(HEAD_MARKER_REF)
     if not refs_args:
         # Repo sem HEAD mas com snapshot — só o snapshot.
         refs_args = [SNAPSHOT_REF]
@@ -546,8 +543,8 @@ def _apply_snapshot_if_present(repo: Path, fresh_clone: bool) -> None:
 
     A mecânica:
     - Em clone fresco: o HEAD aponta para o branch padrão. Posicionamos no
-      HEAD_MARKER_REF (estado do usuário no momento do snapshot) e aplicamos
-      a tree do SNAPSHOT_REF por cima do worktree.
+      head-at-snapshot (SNAPSHOT_REF^ — o parent do commit-snapshot) e
+      aplicamos a tree do SNAPSHOT_REF por cima do worktree.
     - Em repo já existente: NÃO mexemos no HEAD do usuário (que pode estar
       em outro branch). Apenas materializamos os arquivos do snapshot no
       worktree usando `git checkout-index`.
@@ -566,19 +563,21 @@ def _apply_snapshot_if_present(repo: Path, fresh_clone: bool) -> None:
     snapshot_sha = snap_check.stdout.strip()
 
     # Em clone fresco, o `git clone` já criou um worktree a partir do
-    # branch padrão do bundle. Vamos posicionar o HEAD onde o usuário
-    # estava (HEAD_MARKER_REF) e depois materializar o snapshot.
+    # branch padrão do bundle. Posicionamos o HEAD onde o usuário estava
+    # — o primeiro parent do commit-snapshot (SNAPSHOT_REF^), sem ref
+    # dedicada (#17) — e depois materializamos o snapshot por cima.
+    # Snapshot sem parent (repo de origem sem commits) → nada a reposicionar.
     if fresh_clone:
-        head_marker = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", HEAD_MARKER_REF],
+        head_at_snapshot = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", f"{SNAPSHOT_REF}^"],
             capture_output=True, text=True,
         )
-        if head_marker.returncode == 0:
+        if head_at_snapshot.returncode == 0:
             subprocess.run(
-                ["git", "-C", str(repo), "reset", "--hard", head_marker.stdout.strip()],
+                ["git", "-C", str(repo), "reset", "--hard", head_at_snapshot.stdout.strip()],
                 capture_output=True,
             )
-        # As refs internas não pertencem ao usuário.
+        # A ref interna não pertence ao usuário.
         _delete_snapshot_refs(repo)
 
     # Materializa os arquivos do snapshot no worktree.
