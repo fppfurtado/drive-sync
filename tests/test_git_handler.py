@@ -288,3 +288,88 @@ def test_find_git_repos_does_not_descend_into_linked_worktree(tmp_path):
     assert wt in repos          # a worktree em si segue descoberta
     assert nested not in repos  # o aninhado dentro dela, não
     assert main in repos
+
+
+# ---------------------------------------------------------------------------
+# Restore fresh-clone: HEAD derivado de SNAPSHOT_REF^ (sem HEAD_MARKER_REF) (#17)
+# ---------------------------------------------------------------------------
+
+def _git(repo, *args, check=True):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, check=check,
+    )
+
+
+def _init_repo_with_commit(path):
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], capture_output=True, check=True)
+    _git(path, "config", "user.email", "t@t")
+    _git(path, "config", "user.name", "t")
+    (path / "committed.txt").write_text("v1")
+    _git(path, "add", ".")
+    _git(path, "commit", "-q", "-m", "base")
+
+
+def test_fresh_clone_restore_repositions_head_and_restores_wip(tmp_path):
+    """Fresh-clone: HEAD volta ao commit original (via SNAPSHOT_REF^) e o WIP
+    não-commitado + untracked é materializado — prova de equivalência do #17."""
+    from drive_sync.git_handler import create_bundle, restore_from_bundle
+
+    src = tmp_path / "src"
+    _init_repo_with_commit(src)
+    original_head = _git(src, "rev-parse", "HEAD").stdout.strip()
+    # Estado não-commitado: modifica tracked + adiciona untracked.
+    (src / "committed.txt").write_text("v2-uncommitted")
+    (src / "novo.txt").write_text("untracked wip")
+
+    dest_bundle = tmp_path / "src.gitbundle"
+    assert create_bundle(src, dest_bundle, bundle_all=True) is True
+
+    target = tmp_path / "restored"  # NÃO existe → caminho fresh-clone
+    assert restore_from_bundle(dest_bundle, target) is True
+
+    # HEAD no commit original (não num commit-snapshot).
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == original_head
+    # WIP não-commitado materializado no worktree.
+    assert (target / "committed.txt").read_text() == "v2-uncommitted"
+    assert (target / "novo.txt").read_text() == "untracked wip"
+    # Nenhuma ref interna vaza pro repo do usuário.
+    refs = _git(target, "for-each-ref", "refs/drive-sync/").stdout.strip()
+    assert refs == ""
+
+
+def test_fresh_clone_restore_commitless_repo(tmp_path):
+    """Fresh-clone de repo de origem SEM commits: SNAPSHOT_REF^ não existe →
+    sem reposicionamento, mas o conteúdo do worktree é restaurado (#17/#27)."""
+    from drive_sync.git_handler import create_bundle, restore_from_bundle
+
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", str(src)], capture_output=True, check=True)
+    _git(src, "config", "user.email", "t@t")
+    _git(src, "config", "user.name", "t")
+    (src / "so-worktree.txt").write_text("sem commit nenhum")
+
+    dest_bundle = tmp_path / "src.gitbundle"
+    assert create_bundle(src, dest_bundle, bundle_all=True) is True
+
+    target = tmp_path / "restored"
+    # Não deve levantar apesar de SNAPSHOT_REF^ inexistente.
+    restore_from_bundle(dest_bundle, target)
+    assert (target / "so-worktree.txt").read_text() == "sem commit nenhum"
+
+
+def test_delete_snapshot_refs_clears_legacy_head_marker(tmp_path):
+    """Restore cross-version: bundle antigo traz a ref legada head-at-snapshot;
+    _delete_snapshot_refs a apaga junto (transição pré-#17 → sem lixo)."""
+    from drive_sync.git_handler import _delete_snapshot_refs
+    repo = tmp_path / "r"
+    _init_repo_with_commit(repo)
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "update-ref", "refs/drive-sync/snapshot", head)
+    _git(repo, "update-ref", "refs/drive-sync/head-at-snapshot", head)
+
+    _delete_snapshot_refs(repo)
+
+    assert _git(repo, "for-each-ref", "refs/drive-sync/").stdout.strip() == ""
