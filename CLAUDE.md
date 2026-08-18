@@ -110,15 +110,6 @@ The reference config at [config/config.yaml.example](config/config.yaml.example)
 - Plans: `docs/plans/*.md` — pre-fact implementation plans, kept after merge.
 - Backlog: `BACKLOG.md` — `## Próximos` and `## Concluídos` (kept as institutional memory; do not prune).
 
-## Pragmatic Toolkit
-
-<!-- pragmatic-toolkit:config -->
-```yaml
-paths:
-  plans_dir: local
-test_command: "uv run pytest -q --no-header"
-```
-
 <!-- agent-kit operational-floor v11 — single source: agent-kit/onboarding/operational-floor.md
      Copy this whole block into your repo's own AGENTS.md / CLAUDE.md, below your own content.
      Extend BELOW the closing marker; never edit INSIDE the block. Re-copy when the version bumps.
