@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# agent-kit floor pre-push-guard — refuse a direct push to the default branch (generated; do not edit —
+# reinstall via agent-kit onboarding/install_pre_push_guard.py). The sovereign, zero-cost
+# substitute for server-side branch protection: land via a PR, not a direct push.
+protected="$(git config hooks.protectedBranch 2>/dev/null)"
+[ -n "$protected" ] || protected="master"
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$remote_ref" ] || continue
+    if [ "$remote_ref" = "refs/heads/$protected" ] && [ -n "${local_sha//0/}" ]; then
+        echo "pre-push blocked: refusing a direct push to the default branch '$protected'." >&2
+        echo "agent-kit floor: land via a PR (work/<slug> -> PR -> merge), not a direct push." >&2
+        echo "(deliberate override: git push --no-verify.)" >&2
+        exit 1
+    fi
+done
+exit 0
