@@ -108,7 +108,8 @@ The reference config at [config/config.yaml.example](config/config.yaml.example)
 
 - ADRs: `docs/decisions/ADR-*.md` — durable architectural decisions.
 - Plans: `docs/plans/*.md` — pre-fact implementation plans, kept after merge.
-- Backlog: `BACKLOG.md` — `## Próximos` and `## Concluídos` (kept as institutional memory; do not prune).
+- Tracker (trabalho aberto): **GitHub Issues** (`gh issue list`, label `backlog`) — migrado do `BACKLOG.md § Próximos` em 2026-08-24 (issues #35–#47). Filar novo item: `gh issue create` ou `/backlog capture`.
+- Backlog: `BACKLOG.md` — `## Próximos` é só um ponteiro para o GitHub Issues; `## Concluídos` permanece como memória institucional (do not prune).
 
 <!-- agent-kit operational-floor v11 — single source: agent-kit/onboarding/operational-floor.md
      Copy this whole block into your repo's own AGENTS.md / CLAUDE.md, below your own content.
