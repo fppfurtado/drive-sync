@@ -235,6 +235,73 @@ def _validate_repo_subpath_overlap(
             )
 
 
+def _dir_has_content(root: Path) -> bool:
+    """True se a subárvore de `root` contém ao menos um arquivo (dir vazio → False)."""
+    for _dirpath, _dirnames, filenames in os.walk(root):
+        if filenames:
+            return True
+    return False
+
+
+def audit_coverage_orphans(
+    folders: list["FolderConfig"], allow: list[Path]
+) -> list[Path]:
+    """#56 (ADR-015): órfãos de cobertura — subárvores irmãs sem folder cobrindo.
+
+    Modelo B (siblings de configurados): o universo-a-checar são os diretórios-PAIS
+    dos `local_path` configurados. Para cada pai existente, cada filho-DIRETÓRIO com
+    conteúdo que não é ele próprio um path coberto (declarado, ou sob/contendo um
+    declarado) e não está allowlisted é um órfão de cobertura.
+
+    `git_handling` é ORTOGONAL: todo `local_path` declarado conta como "conhecido pelo
+    operador" independente do modo (auto/plain/bundle/skip). O audit sinaliza apenas
+    conteúdo NÃO-declarado. Distinto da classe fatal de ADR-010/011 (malformação DENTRO
+    de um folder declarado, que causa rc=7); aqui é omissão-de-cobertura, que não quebra
+    sync algum.
+
+    **Sinal, não ação** (warn): RETORNA os paths órfãos ordenados — nunca levanta. O
+    call-site (`--check`) imprime; o operador decide cobrir (novo folder) ou excluir
+    (allowlist). Sem escape hatch fatal — cobertura-incompleta é comum e legítima.
+
+    Nota: um folder declarado com `enabled: false` ainda conta como coberto — é um
+    toggle consciente do operador, não um gap silencioso (mesma lógica de git_handling
+    ortogonal). Diretórios ilegíveis (PermissionError) são silenciosamente pulados,
+    paridade com o os.walk dos validadores fatais.
+    """
+    resolved = [f.local_path.resolve() for f in folders]
+    covered = set(resolved)
+    allow_resolved = [a.resolve() for a in allow]
+    parents = {p.parent for p in resolved}
+
+    orphans: set[Path] = set()
+    for parent in parents:
+        if not parent.is_dir():
+            continue
+        try:
+            children = list(parent.iterdir())
+        except OSError:
+            continue  # dir ilegível — skip silente (paridade os.walk)
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+            except OSError:
+                continue
+            c = child.resolve()
+            # coberto: é um path declarado, está DENTRO de um, ou CONTÉM um
+            # (parcialmente coberto — não sinaliza). `c.is_relative_to(c)` cobre o
+            # caso de igualdade exata.
+            if any(c.is_relative_to(cov) or cov.is_relative_to(c) for cov in covered):
+                continue
+            # intencionalmente-fora (allowlist): casa exato ou é subpath de uma entry.
+            if any(c == a or c.is_relative_to(a) for a in allow_resolved):
+                continue
+            if not _dir_has_content(c):
+                continue
+            orphans.add(c)
+    return sorted(orphans)
+
+
 def _expand_synthetic_folder(
     parent: "FolderConfig", override: "SubpathOverride"
 ) -> "FolderConfig":
@@ -342,6 +409,19 @@ class DedupeConfig:
 
 
 @dataclass
+class CoverageAuditConfig:
+    """#56 (ADR-015): audit de cobertura de órfãos, surfaceado em `--check` (warn).
+
+    `allow`: paths (expandidos) tratados como intencionalmente-fora-de-cobertura —
+    siblings de folders configurados que o operador deliberadamente não sincroniza
+    (ex.: tools/, sandbox/, PARA morto). Um path é allowlisted se casa exato OU é
+    subpath de uma entry.
+    """
+    enabled: bool = True
+    allow: list[Path] = field(default_factory=list)
+
+
+@dataclass
 class HealthCheckConfig:
     enabled: bool = True
     interval_seconds: int = 3600
@@ -365,6 +445,7 @@ class AppConfig:
     dedupe: DedupeConfig
     health_check: HealthCheckConfig
     logging: LoggingConfig
+    coverage_audit: CoverageAuditConfig
     source_path: Path  # de onde o arquivo foi carregado (debug)
 
 
@@ -527,6 +608,12 @@ def load_config(path: Path | None = None) -> AppConfig:
         ),
     )
 
+    ca_raw = raw.get("coverage_audit", {}) or {}
+    coverage_audit = CoverageAuditConfig(
+        enabled=bool(ca_raw.get("enabled", True)),
+        allow=[_expand(a) for a in (ca_raw.get("allow") or [])],
+    )
+
     h_raw = raw.get("health_check", {}) or {}
     health_check = HealthCheckConfig(
         enabled=bool(h_raw.get("enabled", True)),
@@ -550,6 +637,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         dedupe=dedupe,
         health_check=health_check,
         logging=logging_cfg,
+        coverage_audit=coverage_audit,
         source_path=cfg_path,
     )
 

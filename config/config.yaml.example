@@ -166,6 +166,20 @@ watcher:
 dedupe:
   skip_subpaths_of_configured_folders: true
 
+# Audit de cobertura (#56 / ADR-015): em `drive-sync --check`, avisa (warn, NÃO
+# fatal — não bloqueia) sobre subárvores IRMÃS dos folders configurados que nenhum
+# folder cobre — conteúdo local não backup-eado (pegaria o caso Screenshots-fora-do-
+# backup no próximo --check). Sinal, não ação: o operador cobre (novo folders:) ou
+# declara intencionalmente-fora em `allow`. `git_handling` é irrelevante aqui — todo
+# local_path declarado conta como "conhecido", inclusive skip/bundle.
+coverage_audit:
+  enabled: true
+  # Siblings deliberadamente NÃO sincronizados (casa exato ou subpath). Silencia o
+  # aviso para os intencionais sem cobri-los.
+  allow: []
+  #  - "~/dev/sandbox"
+  #  - "/storage/tools"
+
 # Probe periódico do backend para detectar falha de auth antes que um job real
 # falhe (Code=8002/9001 do protondrive). Em sessão saudável, gera 1 chamada
 # `rclone about` por intervalo. Desative em máquinas que não devem fazer

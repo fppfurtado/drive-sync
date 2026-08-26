@@ -4,6 +4,7 @@ from pathlib import Path
 
 from drive_sync.config import (
     AppConfig,
+    CoverageAuditConfig,
     DedupeConfig,
     FolderConfig,
     GitConfig,
@@ -30,6 +31,7 @@ def _app(folders: list[FolderConfig], remote_name: str = "proton",
         dedupe=DedupeConfig(),
         health_check=HealthCheckConfig(),
         logging=LoggingConfig(),
+        coverage_audit=CoverageAuditConfig(),
         source_path=Path("/fake/config.yaml"),
     )
 
