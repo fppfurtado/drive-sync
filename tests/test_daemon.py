@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from drive_sync.config import (
     AppConfig,
+    CoverageAuditConfig,
     DedupeConfig,
     FolderConfig,
     GitConfig,
@@ -30,6 +31,7 @@ def _make_config(folders: list[FolderConfig] | None = None) -> AppConfig:
         dedupe=DedupeConfig(),
         health_check=HealthCheckConfig(),
         logging=LoggingConfig(),
+        coverage_audit=CoverageAuditConfig(),
         source_path=Path("/fake/config.yaml"),
     )
 

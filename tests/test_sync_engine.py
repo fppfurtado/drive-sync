@@ -8,6 +8,7 @@ import pytest
 
 from drive_sync.config import (
     AppConfig,
+    CoverageAuditConfig,
     DedupeConfig,
     FolderConfig,
     GitConfig,
@@ -39,6 +40,7 @@ def _app(remote_name: str = "proton", remote_root: str = "Sync") -> AppConfig:
         dedupe=DedupeConfig(),
         health_check=HealthCheckConfig(),
         logging=LoggingConfig(),
+        coverage_audit=CoverageAuditConfig(),
         source_path=Path("/fake/config.yaml"),
     )
 

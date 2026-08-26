@@ -6,7 +6,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from .config import default_config_path, load_config
+from .config import audit_coverage_orphans, default_config_path, load_config
 from .daemon import SyncDaemon
 from .logging_setup import setup_logging
 from .status import render_status
@@ -75,6 +75,21 @@ def main(argv: list[str] | None = None) -> int:
              ", ".join(f.name for f in cfg.folders if f.enabled) or "(nenhuma)")
 
     if args.check:
+        # Audit de cobertura (#56 / ADR-015): warn, não fatal — surface órfãos de
+        # cobertura (subárvores sem folder cobrindo) sem bloquear. Distinto dos
+        # validadores fatais de load_config (auto_exclude/case_duplicates).
+        if cfg.coverage_audit.enabled:
+            orphans = audit_coverage_orphans(cfg.folders, cfg.coverage_audit.allow)
+            if orphans:
+                bullets = "\n".join(f"  - {p}" for p in orphans)
+                print(
+                    "aviso: subárvores sem folder cobrindo (órfãos de cobertura) — "
+                    "conteúdo local não backup-eado:\n"
+                    f"{bullets}\n\n"
+                    "Cada uma: adicione um `folders:` que a cubra, ou declare-a "
+                    "intencionalmente-fora em `coverage_audit.allow`.",
+                    file=sys.stderr,
+                )
         print("Configuração OK.")
         return 0
 
