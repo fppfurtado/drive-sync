@@ -1,10 +1,10 @@
 # Problem Brief: recuperação data-safe de safety-aborts recuperáveis do bisync
 
-- Frozen at: — (withheld, draft)
+- Frozen at: 2026-08-26 (frozen after operator approval — "freeze" instruction, 2026-08-26)
 - Mode: verifiable
 - Distilled from dossier: recovery-safety-abort-rc1-bulk-move (`.throughline/dossiers/`)
-- Brief version: — (withheld pending approval)
-- Status: DRAFT — freeze pending approval
+- Brief version: v1
+- Status: FROZEN
 - Amendments: none
 
 ## Problem statement
