@@ -249,6 +249,27 @@ def _is_stale_listings(stderr: str) -> bool:
     return _STALE_LISTINGS_RE.search(stderr) is not None
 
 
+# Assinatura too-many-deletes do bisync (#52): safety abort do rclone quando o scan
+# atual de Path1 tem >50% menos itens que o baseline `.lst` (uma mudança em massa
+# legítima removeu conteúdo). A ÚNICA dica que o rclone exibe é `Run with --force if
+# desired` — PERIGOSA: `--force` propaga as deleções e causa perda de dados se o
+# conteúdo não estiver salvo em outro lugar. Distinto do rc=7 stale-listings (benigno,
+# auto-recuperável): aqui há divergência REAL, então NÃO auto-recupera — só enriquece
+# o log com advice safe apontando pro playbook rc=1 (invariante `bisync errors do NOT
+# auto-recover` preservado — este braço é sinalização, não recuperação).
+_TOO_MANY_DELETES_RE = re.compile(r"too many deletes")
+
+
+def _is_too_many_deletes(stderr: str) -> bool:
+    """True se o stderr do bisync casa o safety abort `too many deletes` (rc=1).
+
+    Reconhece a assinatura específica do abort perigoso (deleção em massa); o advice
+    enriquecido substitui a dica `--force` cega do rclone por um ponteiro pro branch
+    rc=1 do playbook de recuperação.
+    """
+    return _TOO_MANY_DELETES_RE.search(stderr) is not None
+
+
 # Parse do `bisync --resync --dry-run` (SP-T1 · SP-T4 · ADR-019): prova união
 # no-op. Como `--resync` é união (nunca deleta — F2), cada operação que o resync
 # real faria aparece no dry-run como uma linha `... as --dry-run is set`; o bloco
@@ -528,6 +549,22 @@ class RcloneEngine:
                 "[%s] [BISYNC_FAIL] rc=%d: %s (full stderr: %s)",
                 folder.name, rc, summary, path,
             )
+            # Advice safe de too-many-deletes (#52): o `[BISYNC_FAIL]` acima ecoa a
+            # dica `--force` do rclone (é a linha ERROR verbatim — contrato ADR-012).
+            # Essa dica é PERIGOSA: `--force` propaga as deleções → perda de dados.
+            # Emite um contra-advice greppável apontando pro branch rc=1 do playbook,
+            # sem auto-agir (divergência real → invariante `bisync errors do NOT
+            # auto-recover` vale; recuperação é decisão consciente do operador).
+            if _is_too_many_deletes(err):
+                log.warning(
+                    "[%s] [BISYNC_SAFETY_ABORT] too-many-deletes: uma mudança em "
+                    "massa removeu >50%% dos itens da visão do bisync. NÃO rode "
+                    "`--force` às cegas — propaga as deleções e causa PERDA DE DADOS "
+                    "se o conteúdo não estiver salvo em outro lugar. Decida a "
+                    "intenção primeiro: veja o branch rc=1 em "
+                    "docs/operations/playbook-bisync-recovery.md",
+                    folder.name,
+                )
             # Auto-recuperação gated de rc=7 stale-listings (ADR-019, #47): quando o
             # abort é stale-listings E um dry-run prova que o `--resync` seria união
             # no-op, reconstrói o baseline em vez de ficar degradado indefinidamente.

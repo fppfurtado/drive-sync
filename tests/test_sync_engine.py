@@ -1,5 +1,6 @@
 """Tests for sync_engine — remote URI building and bisync behaviour."""
 import asyncio
+import logging
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from drive_sync.sync_engine import (
     RcloneEngine,
     _classify_rclone_stderr,
     _is_stale_listings,
+    _is_too_many_deletes,
     _dryrun_resync_is_noop,
     _state_marker_for,
     _configure_infra_detection,
@@ -555,6 +557,79 @@ def test_is_stale_listings_false_for_case_duplicates_rc7():
 def test_is_stale_listings_false_for_generic_bisync_error():
     assert _is_stale_listings("ERROR : too many deletes (>50%) — Safety abort") is False
     assert _is_stale_listings("rclone: directory not found") is False
+
+
+# ---------------------------------------------------------------------------
+# _is_too_many_deletes — assinatura rc=1 too-many-deletes (advice safe · #52)
+# ---------------------------------------------------------------------------
+
+# Amostra real (incidente dev-projects 2026-05-31, ADR-012) — preservar literal.
+_STDERR_TOO_MANY_DELETES = (
+    "ERROR : Safety abort: too many deletes (>50%, 68412 of 104018) on Path1 "
+    '"/storage/dev/projects/". Run with --force if desired'
+)
+
+
+def test_is_too_many_deletes_matches_real_signature():
+    assert _is_too_many_deletes(_STDERR_TOO_MANY_DELETES) is True
+
+
+def test_is_too_many_deletes_false_for_stale_listings_rc7():
+    # A assinatura irmã (rc=7 stale-listings, benigno/auto-recuperável) NÃO deve
+    # casar — discriminação é o ponto: too-many-deletes é divergência real e
+    # perigosa, não pode herdar o caminho de auto-resync do rc=7.
+    assert _is_too_many_deletes(_STDERR_STALE_LISTINGS) is False
+
+
+def test_is_too_many_deletes_false_for_generic_bisync_error():
+    assert _is_too_many_deletes("rclone: directory not found") is False
+    assert _is_too_many_deletes("") is False
+
+
+# ---------------------------------------------------------------------------
+# bisync_folder — advice safe [BISYNC_SAFETY_ABORT] no rc=1 too-many-deletes (#52)
+# ---------------------------------------------------------------------------
+
+async def test_too_many_deletes_emits_safety_abort_advice(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    engine = RcloneEngine(_app())
+    folder = _folder(local_path=tmp_path / "local")
+
+    async def fake_run(cmd, timeout=None):
+        if "mkdir" in cmd:
+            return (0, "", "")
+        return (1, "", _STDERR_TOO_MANY_DELETES)
+
+    with caplog.at_level(logging.WARNING, logger="drive_sync.sync_engine"):
+        with patch("drive_sync.sync_engine._run", fake_run):
+            result = await engine.bisync_folder(folder)
+
+    # Sinalização, não recuperação: o folder segue degradado (invariante preservado).
+    assert result is False
+    safety = [r for r in caplog.records if "[BISYNC_SAFETY_ABORT]" in r.getMessage()]
+    assert len(safety) == 1
+    msg = safety[0].getMessage()
+    # O advice NÃO ecoa a dica `--force` cega e aponta pro branch rc=1 do playbook.
+    assert "playbook-bisync-recovery.md" in msg
+    assert "PERDA DE DADOS" in msg
+
+
+async def test_generic_bisync_error_no_safety_abort_advice(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    engine = RcloneEngine(_app())
+    folder = _folder(local_path=tmp_path / "local")
+
+    async def fake_run(cmd, timeout=None):
+        if "mkdir" in cmd:
+            return (0, "", "")
+        return (1, "", "rclone: something unrelated went wrong")
+
+    with caplog.at_level(logging.WARNING, logger="drive_sync.sync_engine"):
+        with patch("drive_sync.sync_engine._run", fake_run):
+            result = await engine.bisync_folder(folder)
+
+    assert result is False
+    assert not [r for r in caplog.records if "[BISYNC_SAFETY_ABORT]" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------
