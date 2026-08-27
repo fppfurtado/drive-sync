@@ -13,6 +13,12 @@ rclone:
     - "--retries=3"
     - "--low-level-retries=10"
     - "--track-renames"
+  # Detecção de flakiness transitória do provedor (ADR-016 · #35/#46): um erro de
+  # auth colateral de um storm de 5xx é reclassificado para `proton_infra`
+  # (recovery = aguardar, sem reauth) em vez de credencial-genuína, com
+  # auto-resume gated por probe. Defaults calibrados de 2 incidentes.
+  infra_storm_threshold: 5          # nº de 5xx numa janela para considerar storm (>= 1)
+  infra_window_seconds: 600         # janela deslizante do detector, em segundos (> 0)
 
 # -----------------------------------------------------------------------------
 # git_handling options (ADR-008):

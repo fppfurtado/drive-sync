@@ -572,6 +572,17 @@ def load_config(path: Path | None = None) -> AppConfig:
         infra_storm_threshold=int(rclone_raw.get("infra_storm_threshold", 5)),
         infra_window_seconds=float(rclone_raw.get("infra_window_seconds", 600.0)),
     )
+    if rclone.infra_storm_threshold < 1:
+        raise ValueError(
+            "rclone.infra_storm_threshold deve ser >= 1 (recebido "
+            f"{rclone.infra_storm_threshold}); 0/negativo faria TODA falha de "
+            "auth ser tratada como flakiness transitória (ADR-016)."
+        )
+    if rclone.infra_window_seconds <= 0:
+        raise ValueError(
+            "rclone.infra_window_seconds deve ser > 0 (recebido "
+            f"{rclone.infra_window_seconds})."
+        )
 
     git_raw = raw.get("git", {}) or {}
     git = GitConfig(

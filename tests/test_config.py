@@ -549,3 +549,33 @@ def test_overlapping_subpaths_reverse_order_raises(tmp_path):
     """)
     with pytest.raises(ValueError, match="aninhado"):
         load_config(cfg)
+
+
+# ---------------------------------------------------------------------------
+# ADR-016 — validação do detector de storm (F1 do Review)
+# ---------------------------------------------------------------------------
+
+def test_infra_storm_threshold_below_one_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        rclone:
+          infra_storm_threshold: 0
+        folders:
+          - name: docs
+            local_path: /tmp/docs
+            remote_subpath: Documents
+    """)
+    with pytest.raises(ValueError, match="infra_storm_threshold"):
+        load_config(cfg)
+
+
+def test_infra_window_seconds_non_positive_raises(tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        rclone:
+          infra_window_seconds: 0
+        folders:
+          - name: docs
+            local_path: /tmp/docs
+            remote_subpath: Documents
+    """)
+    with pytest.raises(ValueError, match="infra_window_seconds"):
+        load_config(cfg)

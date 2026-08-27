@@ -20,12 +20,7 @@ from pathlib import Path
 from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
 from .notifier import Notifier
-from .sync_engine import (
-    AuthDegradedError,
-    RcloneEngine,
-    _infra_storm_active,
-    remote_uri_for,
-)
+from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
 from .watcher import FilesystemWatcher, WatchLimitError
 
 log = logging.getLogger(__name__)
@@ -131,25 +126,31 @@ class SyncDaemon:
     async def _probe_while_degraded(self) -> None:
         """SP-T5: auto-resume gated de proton_infra.
 
-        proton_infra → probe leve; sucesso REAL (rc==0) retoma os workers sem
-        restart manual; falha persistente com provedor saudável (janela de 5xx
-        vazia) escala para credencial-genuína. Kind genuíno → permanece pausado
-        (nem sequer faz probe — preserva o "sem auto-resume" do ADR-003)."""
+        O sinal de escalada é o RESULTADO DO PRÓPRIO PROBE — não o estado da
+        janela de 5xx, que fica drenada enquanto pausado (workers parados não a
+        alimentam; um probe solitário adiciona 1 sinal/ciclo, nunca reconstitui
+        o storm → o proxy "provedor saudável" seria falso-por-construção num
+        outage sustentado). Três desfechos:
+        - probe rc==0 → provedor + auth OK → retoma os workers sem restart.
+        - probe levanta AuthDegradedError com kind genuíno (sem storm ativo →
+          credencial-real) → provedor de pé mas auth quebrada → conta para a
+          escalada; após N, escala para auth_uncertain (permanece pausado).
+        - probe rc≠0 sem AuthDegradedError (5xx/rede) → ainda outage → permanece
+          pausado e NÃO escala (evita a orientação de reauth durante o outage —
+          o defeito que a feature existe para eliminar).
+        Kind genuíno de entrada → nem faz probe (preserva "sem auto-resume" ADR-003)."""
         if self._degraded_kind != "proton_infra":
             return
         try:
             ok = await self.engine.auth_probe()
-        except AuthDegradedError:
-            ok = False
+        except AuthDegradedError as exc:
+            if exc.kind != "proton_infra":
+                self._infra_probe_failures += 1
+                if self._infra_probe_failures >= _INFRA_ESCALATE_AFTER:
+                    self._escalate_proton_infra()
+            return
         if ok:
             self._resume_from_degraded()
-            return
-        self._infra_probe_failures += 1
-        if (
-            not _infra_storm_active()
-            and self._infra_probe_failures >= _INFRA_ESCALATE_AFTER
-        ):
-            self._escalate_proton_infra()
 
     # ------------------------------------------------------------------
     # Roteamento de uma tarefa: três modos possíveis.

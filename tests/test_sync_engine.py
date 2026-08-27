@@ -24,6 +24,7 @@ from drive_sync.sync_engine import (
     RcloneEngine,
     _classify_rclone_stderr,
     _configure_infra_detection,
+    _infra_storm_active,
     _infra_window,
     _record_infra_signals,
     _reset_infra_window,
@@ -664,3 +665,15 @@ def test_classify_storm_below_threshold_stays_credential():
         _record_infra_signals("... (Code=0, Status=502)")
     err = _classify_rclone_stderr(_STDERR_8002)
     assert err.kind == "invalid_credentials"
+
+
+def test_infra_window_prunes_expired_entries():
+    # F2 (Review): a janela é DESLIZANTE — entradas mais velhas que
+    # window_seconds são podadas por _infra_storm_active. Sem a poda, um storm
+    # antigo contaria para sempre.
+    _reset_infra_window()
+    _configure_infra_detection(threshold=1, window_seconds=600.0)
+    _infra_window.append(time.monotonic() - 10_000)  # entrada expirada
+    assert _infra_storm_active() is False  # podada → 0 >= 1 é False
+    _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
+    assert _infra_storm_active() is True  # entrada fresca conta → 1 >= 1
