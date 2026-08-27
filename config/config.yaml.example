@@ -67,6 +67,12 @@ rclone:
 # subpath_overrides (ADR-006): override de git_handling em subpath arbitrário.
 # Schema: [{subpath, git_handling: skip|bundle|plain}]. Coexiste com
 # repo_overrides; loader rejeita sobreposição na mesma lista.
+#
+# ESPELHO-POR-DEFAULT (ADR-020): remote_subpath DEVE espelhar o nome/estrutura do
+# local_path (o leaf remoto = o nome local; prefixo estrutural OK). Toda divergência
+# é exclude: explícito OU motivo registrado (ADR) — nunca renomeação silenciosa.
+# Renome de remoto: SEMPRE via DirMove server-side (rclone move), nunca flip de
+# remote_subpath (isso causa rc=7 — ADR-020 §Consequências, incidente #54).
 # -----------------------------------------------------------------------------
 folders:
 
