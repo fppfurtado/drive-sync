@@ -76,11 +76,11 @@ def _folder(name: str = "docs", remote_subpath: str = "Documents", *, auto_exclu
     )
 
 
-async def _fake_ok(cmd: list[str]) -> tuple[int, str, str]:
+async def _fake_ok(cmd: list[str], timeout: float | None = None) -> tuple[int, str, str]:
     return (0, "", "")
 
 
-async def _fake_err(cmd: list[str]) -> tuple[int, str, str]:
+async def _fake_err(cmd: list[str], timeout: float | None = None) -> tuple[int, str, str]:
     return (1, "", "rclone: something went wrong")
 
 
@@ -137,7 +137,7 @@ async def test_first_run_adds_resync_flag(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "local")
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -163,7 +163,7 @@ async def test_subsequent_run_omits_resync(tmp_path, monkeypatch):
 
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -182,7 +182,7 @@ async def test_failed_bisync_returns_false(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "local")
 
     # mkdir succeeds, bisync fails
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         if "mkdir" in cmd:
             return (0, "", "")
         return (1, "", "rclone: something went wrong")
@@ -225,7 +225,7 @@ async def test_auto_exclude_appends_preset_patterns(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "code", auto_exclude=True)
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -243,7 +243,7 @@ async def test_auto_exclude_false_skips_presets(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "code", auto_exclude=False)
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -264,7 +264,7 @@ async def test_mkdir_called_before_bisync(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "local")
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -281,7 +281,7 @@ async def test_mkdir_failure_aborts_bisync(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "local")
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         if "mkdir" in cmd:
             return (1, "", "rclone: mkdir failed")
@@ -301,7 +301,7 @@ async def test_mkdir_uses_correct_remote(tmp_path, monkeypatch):
     folder = _folder(remote_subpath="dev/projects", local_path=tmp_path / "local")
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -576,7 +576,7 @@ async def test_bisync_folder_propagates_auth_error(tmp_path, monkeypatch):
     engine = RcloneEngine(_app())
     folder = _folder(local_path=tmp_path / "local")
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         raise AuthDegradedError(kind="invalid_credentials", code=8002, stderr_tail="...")
 
     with patch("drive_sync.sync_engine._run", fake_run):
@@ -591,7 +591,7 @@ async def test_bisync_folder_propagates_auth_error(tmp_path, monkeypatch):
 async def test_auth_probe_propagates_auth_error():
     engine = RcloneEngine(_app())
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         raise AuthDegradedError(kind="captcha_required", code=9001, stderr_tail="...")
 
     with patch("drive_sync.sync_engine._run", fake_run):
@@ -602,7 +602,7 @@ async def test_auth_probe_propagates_auth_error():
 async def test_auth_probe_silences_non_auth_error():
     engine = RcloneEngine(_app())
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         raise OSError("network unreachable")
 
     with patch("drive_sync.sync_engine._run", fake_run):
@@ -720,7 +720,7 @@ async def test_all_rclone_calls_carry_empty_2fa(tmp_path, monkeypatch):
     folder = _folder(local_path=tmp_path / "local")
     captured: list[list[str]] = []
 
-    async def fake_run(cmd):
+    async def fake_run(cmd, timeout=None):
         captured.append(cmd)
         return (0, "", "")
 
@@ -731,3 +731,80 @@ async def test_all_rclone_calls_carry_empty_2fa(tmp_path, monkeypatch):
     assert _bisync_calls(captured), "bisync deve ter sido chamado"
     for cmd in captured:
         assert _carries_empty_2fa(cmd), f"cmd sem --protondrive-2fa vazio: {cmd}"
+
+
+# ---------------------------------------------------------------------------
+# #45 — max-runtime kill switch por job rclone.
+# ---------------------------------------------------------------------------
+from drive_sync.sync_engine import StuckJobError  # noqa: E402
+
+
+async def test_run_kills_stuck_job_and_raises():
+    """Job que estoura o timeout é morto rápido (não espera o processo terminar)
+    e levanta StuckJobError carregando o limite."""
+    start = time.monotonic()
+    with pytest.raises(StuckJobError) as ei:
+        await _run(["sleep", "10"], timeout=0.3)
+    elapsed = time.monotonic() - start
+    assert elapsed < 5.0, f"não matou rápido: {elapsed}s (esperava ~0.3s + grace)"
+    assert ei.value.timeout_seconds == 0.3
+
+
+async def test_run_no_timeout_completes_normally():
+    rc, _out, _err = await _run(["true"], timeout=None)
+    assert rc == 0
+
+
+async def test_run_finishes_before_timeout_not_killed():
+    rc, _out, _err = await _run(["true"], timeout=30)
+    assert rc == 0
+
+
+def test_job_timeout_folder_override_wins():
+    app = _app()
+    app.rclone.max_job_runtime_seconds = 7200
+    engine = RcloneEngine(app)
+    folder = _folder()
+    folder.max_job_runtime_seconds = 60
+    assert engine._job_timeout(folder) == 60.0
+
+
+def test_job_timeout_inherits_global_when_folder_none():
+    app = _app()
+    app.rclone.max_job_runtime_seconds = 100
+    engine = RcloneEngine(app)
+    folder = _folder()  # max_job_runtime_seconds = None
+    assert engine._job_timeout(folder) == 100.0
+
+
+def test_job_timeout_disabled_returns_none():
+    # global 0 → desligado
+    app = _app()
+    app.rclone.max_job_runtime_seconds = 0
+    assert RcloneEngine(app)._job_timeout(_folder()) is None
+    # folder 0 sobrepõe global não-zero → desligado só para o folder
+    app2 = _app()
+    app2.rclone.max_job_runtime_seconds = 7200
+    folder = _folder()
+    folder.max_job_runtime_seconds = 0
+    assert RcloneEngine(app2)._job_timeout(folder) is None
+
+
+async def test_bisync_passes_folder_timeout_to_every_run(tmp_path, monkeypatch):
+    """mkdir E bisync recebem o timeout resolvido do folder (#45)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    app.rclone.max_job_runtime_seconds = 111
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    seen: list[float | None] = []
+
+    async def fake_run(cmd, timeout=None):
+        seen.append(timeout)
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        await engine.bisync_folder(folder)
+
+    assert seen, "esperava ao menos mkdir + bisync"
+    assert all(t == 111.0 for t in seen), f"timeout não propagado: {seen}"

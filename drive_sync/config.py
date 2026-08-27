@@ -317,6 +317,7 @@ def _expand_synthetic_folder(
         auto_exclude=parent.auto_exclude,
         debounce_seconds=parent.debounce_seconds,
         cooldown_seconds=parent.cooldown_seconds,
+        max_job_runtime_seconds=parent.max_job_runtime_seconds,
         subpath_overrides=[],
         repo_overrides=[],
         fs_key=synthetic_name.replace("/", "-"),
@@ -368,6 +369,10 @@ class FolderConfig:
     auto_exclude: bool = True
     debounce_seconds: int = 5
     cooldown_seconds: int = 0
+    # #45: override per-folder do max-runtime kill switch. None = herda
+    # rclone.max_job_runtime_seconds; 0 = desligado para este folder (útil quando
+    # um folder legitimamente demora mais que o default global).
+    max_job_runtime_seconds: int | None = None
     subpath_overrides: list[SubpathOverride] = field(default_factory=list)
     repo_overrides: list[RepoOverride] = field(default_factory=list)
     fs_key: str = ""  # slug filesystem-safe; default vira `name` no __post_init__ — ADR-006
@@ -387,6 +392,11 @@ class RcloneConfig:
     # nº de erros 5xx numa janela deslizante para considerar um "storm" ativo.
     infra_storm_threshold: int = 5
     infra_window_seconds: float = 600.0
+    # #45: limite global de runtime por job rclone (segundos). Um job que estoura
+    # é morto (SIGTERM → SIGKILL) e o folder entra em degraded — libera o lock
+    # serializado (ADR-001) do caso degenerado (14h stuck no incidente 2026-05-29).
+    # 0 = desligado. Override per-folder via FolderConfig.max_job_runtime_seconds.
+    max_job_runtime_seconds: int = 7200
 
 
 @dataclass
@@ -516,6 +526,19 @@ def load_config(path: Path | None = None) -> AppConfig:
                 f"(deve ser >= 0; use 0 para desligar)"
             )
 
+        # #45: override per-folder do max-runtime. Ausente = None (herda global);
+        # presente = int >= 0 (0 desliga só para este folder).
+        max_job_runtime_raw = entry.get("max_job_runtime_seconds")
+        if max_job_runtime_raw is None:
+            max_job_runtime_seconds = None
+        else:
+            max_job_runtime_seconds = int(max_job_runtime_raw)
+            if max_job_runtime_seconds < 0:
+                raise ValueError(
+                    f"max_job_runtime_seconds inválido em {name!r}: "
+                    f"{max_job_runtime_seconds} (deve ser >= 0; use 0 para desligar)"
+                )
+
         overrides_raw = entry.get("subpath_overrides") or []
         overrides = _parse_subpath_overrides(name, overrides_raw)
 
@@ -533,6 +556,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             auto_exclude=bool(entry.get("auto_exclude", True)),
             debounce_seconds=int(entry.get("debounce_seconds", 5)),
             cooldown_seconds=cooldown_seconds,
+            max_job_runtime_seconds=max_job_runtime_seconds,
             subpath_overrides=overrides,
             repo_overrides=repo_overrides,
         )
@@ -571,6 +595,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         global_flags=list(rclone_raw.get("global_flags", [])),
         infra_storm_threshold=int(rclone_raw.get("infra_storm_threshold", 5)),
         infra_window_seconds=float(rclone_raw.get("infra_window_seconds", 600.0)),
+        max_job_runtime_seconds=int(rclone_raw.get("max_job_runtime_seconds", 7200)),
     )
     if rclone.infra_storm_threshold < 1:
         raise ValueError(
@@ -582,6 +607,11 @@ def load_config(path: Path | None = None) -> AppConfig:
         raise ValueError(
             "rclone.infra_window_seconds deve ser > 0 (recebido "
             f"{rclone.infra_window_seconds})."
+        )
+    if rclone.max_job_runtime_seconds < 0:
+        raise ValueError(
+            "rclone.max_job_runtime_seconds deve ser >= 0 (recebido "
+            f"{rclone.max_job_runtime_seconds}); use 0 para desligar o kill switch (#45)."
         )
 
     git_raw = raw.get("git", {}) or {}
