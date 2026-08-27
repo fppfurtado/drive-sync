@@ -990,3 +990,45 @@ async def test_autoresync_guard_cleared_on_success(tmp_path, monkeypatch):
     with patch("drive_sync.sync_engine._run", _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_NOOP)):
         await engine.bisync_folder(folder)
     assert marker not in engine._autoresync_attempted, "sucesso deve limpar o guard"
+
+
+async def test_autoresync_resync_failure_stays_degraded(tmp_path, monkeypatch):
+    # F2 (review): dry-run prova no-op mas o --resync real falha (rc≠0) → NÃO
+    # recupera, permanece degradado (marker fica no guard: houve veredito, não sucesso).
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    marker = _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    fake = _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_NOOP, resync_rc=1)
+    with patch("drive_sync.sync_engine._run", fake):
+        result = await engine.bisync_folder(folder)
+    assert result is False
+    assert len(_real_resync_calls(captured)) == 1, "tentou o --resync real pós-prova"
+    assert marker in engine._autoresync_attempted, "veredito alcançado → tentativa consumida"
+
+
+async def test_autoresync_guard_not_burned_on_exception(tmp_path, monkeypatch):
+    # F1 (review): se o dry-run levanta exceção (ex.: AuthDegradedError de storm
+    # remanescente — o mesmo storm que causou o rc=7), o guard NÃO é queimado →
+    # próximo ciclo pode re-tentar. Sem isso, um blip barraria auto-resync até restart.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    marker = _prime_marker(app, folder)
+
+    async def fake_run(cmd, timeout=None):
+        if "mkdir" in cmd:
+            return (0, "", "")
+        if "bisync" in cmd and "--dry-run" in cmd:
+            raise AuthDegradedError("proton_infra", 8002, "storm remanescente")
+        if "bisync" in cmd:
+            return (7, "", _STALE_STDERR)
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        with pytest.raises(AuthDegradedError):
+            await engine.bisync_folder(folder)
+    assert marker not in engine._autoresync_attempted, "exceção não deve consumir a tentativa"

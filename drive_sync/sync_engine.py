@@ -540,7 +540,18 @@ class RcloneEngine:
                 and marker not in self._autoresync_attempted
             ):
                 self._autoresync_attempted.add(marker)
-                if not await self._attempt_gated_autoresync(folder, cmd, timeout):
+                try:
+                    recovered = await self._attempt_gated_autoresync(folder, cmd, timeout)
+                except Exception:
+                    # Attempt abortado por exceção (ex.: AuthDegradedError de storm
+                    # remanescente — o mesmo storm que causou o rc=7; ou StuckJobError):
+                    # NENHUM veredito no-op/divergente foi alcançado, então NÃO consumiu
+                    # a tentativa do episódio. Libera o guard para re-tentar no próximo
+                    # ciclo e re-levanta (o daemon trata auth/stuck). Sem este discard,
+                    # um blip transitório barraria a auto-recuperação até o restart.
+                    self._autoresync_attempted.discard(marker)
+                    raise
+                if not recovered:
                     return False
                 # Recuperado — cai no tail de sucesso abaixo.
             else:
