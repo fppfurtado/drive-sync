@@ -26,6 +26,21 @@ from .watcher import FilesystemWatcher, WatchLimitError
 log = logging.getLogger(__name__)
 
 
+def _compose_degraded_reason(kind: str, code: int, stderr_tail: str) -> str:
+    """Compõe o reason do estado degraded a partir do kind classificado (SP-T4).
+
+    `proton_infra` (flakiness transitória do provedor) NÃO instrui reauth —
+    orienta aguardar a recuperação. Kinds de credencial genuína mantêm o
+    formato original (a orientação de reauth vive no ADR-003).
+    """
+    if kind == "proton_infra":
+        return (
+            f"proton_infra (Code={code}) — flakiness transitória do provedor; "
+            f"aguardar recuperação, NÃO refazer auth — tail: {stderr_tail}"
+        )
+    return f"{kind} (Code={code}) — tail: {stderr_tail}"
+
+
 class SyncDaemon:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -296,7 +311,9 @@ class SyncDaemon:
                 async with self._semaphore:
                     await self._process_folder(folder)
             except AuthDegradedError as exc:
-                self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
+                self._enter_degraded(
+                    _compose_degraded_reason(exc.kind, exc.code, exc.stderr_tail)
+                )
             except Exception as exc:  # noqa: BLE001
                 log.exception("[%s] Erro inesperado: %s", folder.name, exc)
             finally:

@@ -14,7 +14,7 @@ from drive_sync.config import (
     RcloneConfig,
     WatcherConfig,
 )
-from drive_sync.daemon import SyncDaemon
+from drive_sync.daemon import SyncDaemon, _compose_degraded_reason
 from drive_sync.sync_engine import AuthDegradedError
 
 
@@ -670,3 +670,25 @@ async def test_sync_git_folder_skips_linked_worktrees(tmp_path):
     bundled = [call.args[1] for call in daemon._bundle_single_repo.call_args_list]
     assert main in bundled
     assert wt not in bundled
+
+
+# ---------------------------------------------------------------------------
+# SP-T4 — mensagem de recuperação por kind (proton_infra NÃO instrui reauth)
+# ---------------------------------------------------------------------------
+
+
+def test_degraded_reason_proton_infra_does_not_instruct_reauth():
+    # EARS SP-T4: WHEN o daemon entra em degraded com kind=proton_infra, the
+    # system SHALL emitir mensagem que NÃO instrui refazer auth/2FA.
+    reason = _compose_degraded_reason("proton_infra", 8002, "…tail…")
+    low = reason.lower()
+    assert "proton_infra" in reason
+    assert "aguardar" in low
+    assert "não refazer auth" in low
+    assert "config update" not in low  # não instrui reauth
+
+
+def test_degraded_reason_genuine_credential_unchanged():
+    # Kind de credencial genuína mantém o formato original.
+    reason = _compose_degraded_reason("invalid_credentials", 8002, "tail")
+    assert reason == "invalid_credentials (Code=8002) — tail: tail"
