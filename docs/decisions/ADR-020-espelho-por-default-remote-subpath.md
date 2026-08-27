@@ -40,8 +40,10 @@ Adotar **espelho-por-default, exclusão-por-exceção** como princípio de gover
    - `/storage/3. Resources` — legado PARA morto (substituído por `areas/`).
    - `/storage/.Trash-1000` — lixeira, nunca backup.
 5. **Cobertura de conteúdo vivo não-declarado:** `/storage/dev/api-collections` (14 itens, barato) →
-   **incluir** (novo folder `dev-api-collections` → remoto `dev/api-collections`, espelhado). Soberania:
-   conteúdo vivo pequeno entra, não fica órfão.
+   decisão: **incluir** (novo folder `dev-api-collections` → remoto `dev/api-collections`, espelhado).
+   Soberania: conteúdo vivo pequeno entra, não fica órfão. **Implementação diferida** a um follow-up
+   trivial de #55 (adicionar um novo folder é uma ação de backup distinta — mantida fora do ciclo
+   `library→areas` para não expandir a superfície operacional aprovada).
 
 ## Consequências
 
