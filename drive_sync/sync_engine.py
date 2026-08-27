@@ -227,6 +227,28 @@ def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
     )
 
 
+# Assinatura stale-listings do bisync (SP-T2 · #47 · ADR-019): rc=7 cujo estado
+# `.lst` morreu (ex.: queda de rede / storm 5xx da Proton no meio de um bisync
+# longo). O rclone reporta "cannot find prior Path1 or Path2 listings" +
+# "Must run --resync to recover". Distinto de OUTRAS causas de rc=7 — ex.: colisão
+# case-insensitive (ADR-011), cujo abort NÃO casa estas frases e segue o
+# tratamento default de BISYNC_FAIL. Recuperável via --resync data-safe
+# (auto-recuperação gated em bisync_folder).
+_STALE_LISTINGS_RE = re.compile(
+    r"cannot find prior Path1 or Path2 listings|Must run --resync to recover"
+)
+
+
+def _is_stale_listings(stderr: str) -> bool:
+    """True se o stderr do rclone indica o abort stale-listings (baseline `.lst` morto).
+
+    Reconhece a assinatura específica do caso recuperável por `--resync`; outras
+    causas de rc=7 (ex.: case-duplicates, ADR-011) retornam False e seguem o
+    tratamento default de `[BISYNC_FAIL]`.
+    """
+    return _STALE_LISTINGS_RE.search(stderr) is not None
+
+
 def _bisync_state_dir() -> Path:
     """Diretório onde o rclone guarda o estado das bisync (XDG)."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")

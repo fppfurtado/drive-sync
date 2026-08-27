@@ -23,6 +23,7 @@ from drive_sync.sync_engine import (
     AuthDegradedError,
     RcloneEngine,
     _classify_rclone_stderr,
+    _is_stale_listings,
     _configure_infra_detection,
     _infra_storm_active,
     _infra_window,
@@ -514,6 +515,44 @@ def test_classify_returns_none_without_auth_endpoint():
     # Códigos batem mas o path não contém /auth/v4 — descarta.
     stderr = "POST https://api.proton.me/drive/v2/foo (Code=8002, Status=422)"
     assert _classify_rclone_stderr(stderr) is None
+
+
+# ---------------------------------------------------------------------------
+# _is_stale_listings — assinatura rc=7 recuperável por --resync (SP-T2 · #47)
+# ---------------------------------------------------------------------------
+
+# Amostra real (incidente library 2026-08-27) — preservar literal.
+_STDERR_STALE_LISTINGS = (
+    "ERROR : Bisync critical error: cannot find prior Path1 or Path2 listings, "
+    "likely due to critical error on prior run\n"
+    "ERROR : Bisync aborted. Must run --resync to recover."
+)
+
+
+def test_is_stale_listings_matches_real_signature():
+    assert _is_stale_listings(_STDERR_STALE_LISTINGS) is True
+
+
+def test_is_stale_listings_matches_either_phrase_alone():
+    # Robustez: qualquer uma das duas frases-âncora basta.
+    assert _is_stale_listings("cannot find prior Path1 or Path2 listings") is True
+    assert _is_stale_listings("Bisync aborted. Must run --resync to recover.") is True
+
+
+def test_is_stale_listings_false_for_case_duplicates_rc7():
+    # OUTRA causa de rc=7 (colisão case-insensitive, ADR-011) NÃO deve casar —
+    # discriminação é o ponto: o abort de case-duplicates não é auto-recuperável
+    # por --resync (exige cleanup no FS pelo operador).
+    stderr = (
+        "ERROR : Bisync critical error: rclone aborted: found case-insensitive "
+        "duplicate names (family/ vs Family/) — resolve before syncing"
+    )
+    assert _is_stale_listings(stderr) is False
+
+
+def test_is_stale_listings_false_for_generic_bisync_error():
+    assert _is_stale_listings("ERROR : too many deletes (>50%) — Safety abort") is False
+    assert _is_stale_listings("rclone: directory not found") is False
 
 
 # ---------------------------------------------------------------------------
