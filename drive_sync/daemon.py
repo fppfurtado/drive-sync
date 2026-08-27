@@ -20,7 +20,7 @@ from pathlib import Path
 from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
 from .notifier import Notifier
-from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
+from .sync_engine import AuthDegradedError, RcloneEngine, StuckJobError, remote_uri_for
 from .watcher import FilesystemWatcher, WatchLimitError
 
 log = logging.getLogger(__name__)
@@ -187,13 +187,27 @@ class SyncDaemon:
 
         log.info("[%s] Iniciando job (modo=%s).", folder.name, folder.git_handling)
 
-        if folder.git_handling == "auto":
-            success = await self._process_auto(folder)
-        elif folder.git_handling == "bundle":
-            await self._sync_git_folder(folder)
-            success = True
-        else:  # "plain"
-            success = await self.engine.bisync_folder(folder)
+        try:
+            if folder.git_handling == "auto":
+                success = await self._process_auto(folder)
+            elif folder.git_handling == "bundle":
+                await self._sync_git_folder(folder)
+                success = True
+            else:  # "plain"
+                success = await self.engine.bisync_folder(folder)
+        except StuckJobError as exc:
+            # #45: job estourou o max-runtime e foi morto pelo _run (lock já
+            # liberado). Degraded PER-FOLDER (reusa infra ADR-005) — ao contrário
+            # de auth (ADR-003), NÃO pausa os workers: os outros folders seguem.
+            # Aqui (não no _worker) cobre também o path do _periodic_full_sync.
+            # Sem auto-resume — restart manual (invariante `bisync errors do NOT
+            # auto-recover`). Retorna False → staleness/degraded já sinalizado.
+            reason = f"job morto após {exc.timeout_seconds / 3600:.1f}h (max_job_runtime)"
+            log.error("[%s] [STUCK_JOB] %s", folder.name, reason)
+            self._degraded_folders[folder.name] = reason
+            self._notifier.folder_degraded(folder.name, reason)
+            self._notifier.send_status(self._compose_status_payload())
+            return False
 
         if success:
             self._mark_success(folder)

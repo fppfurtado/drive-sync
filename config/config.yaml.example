@@ -20,6 +20,14 @@ rclone:
   infra_storm_threshold: 5          # nº de 5xx numa janela para considerar storm (>= 1)
   infra_window_seconds: 600         # janela deslizante do detector, em segundos (> 0)
 
+  # #45 — kill switch por job rclone. Um job que ultrapassa este limite é morto
+  # (SIGTERM → SIGKILL) e o folder entra em degraded (libera o lock serializado
+  # do ADR-001 do caso degenerado — no incidente 2026-05-29 um único bisync sem
+  # excludes segurou o lock por 14h). Default 7200 (2h); 0 desliga. Se um folder
+  # legitimamente demora mais que isso, suba o valor OU use o override per-folder
+  # abaixo — um sync legítimo morto por engano fica VISÍVEL como `[STUCK_JOB]`.
+  max_job_runtime_seconds: 7200
+
 # -----------------------------------------------------------------------------
 # git_handling options (ADR-008):
 #   auto    — scan + `git remote -v` decide per repo (default for code folders).
@@ -82,6 +90,10 @@ folders:
     cooldown_seconds: 10800           # 3h
     auto_exclude: true
     debounce_seconds: 40
+    # #45 — override do kill switch para ESTE folder. Ausente = herda o global
+    # rclone.max_job_runtime_seconds; 0 = desliga só aqui (ex.: um folder enorme
+    # cujo sync legítimo excede o default global).
+    # max_job_runtime_seconds: 0
 
   - name: "dotfiles"
     local_path: "~/.dotfiles"

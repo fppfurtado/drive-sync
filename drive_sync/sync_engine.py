@@ -180,6 +180,27 @@ class AuthDegradedError(RuntimeError):
         super().__init__(f"{kind} (Code={code})")
 
 
+# Janela de graça entre SIGTERM e SIGKILL ao matar um job estourado (#45): dá ao
+# rclone a chance de sair limpo (fechar sockets/state) antes do kill forçado.
+_STUCK_JOB_GRACE_SECONDS = 10.0
+
+
+class StuckJobError(RuntimeError):
+    """Levantada por `_run` quando um job rclone ultrapassa seu `max_job_runtime_seconds`.
+
+    #45: um único bisync sem excludes segurou o lock global (ADR-001) por 14h sem
+    ação automática. O `_run` mata o subprocess (SIGTERM → grace → SIGKILL) e
+    levanta este erro; o daemon o traduz em `[STUCK_JOB]` + folder degradado
+    (reusa infra ADR-005), liberando o lock para outros folders. Restart manual
+    continua sendo o recovery (consistente com `bisync errors do NOT auto-recover`).
+    Carrega o limite estourado para o daemon compor a mensagem.
+    """
+
+    def __init__(self, timeout_seconds: float):
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"job excedeu max_job_runtime_seconds={timeout_seconds:g}s")
+
+
 def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
     """Detecta falha de auth conhecida do backend protondrive no stderr do rclone.
 
@@ -233,12 +254,19 @@ def remote_uri_for(folder: FolderConfig, app: AppConfig, sub: str | None = None)
     return f"{app.rclone.remote_name}:{path}"
 
 
-async def _run(cmd: list[str]) -> tuple[int, str, str]:
+async def _run(cmd: list[str], timeout: float | None = None) -> tuple[int, str, str]:
     """Roda processo de forma assíncrona e devolve (rc, stdout, stderr).
 
     Levanta `AuthDegradedError` quando o rclone retorna não-zero com stderr
     casando padrão de falha de auth conhecida (ver `_AUTH_CODES`). Demais erros
     retornam normalmente — caller é quem decide o que fazer.
+
+    `timeout` (#45): se > 0 e o processo não terminar dentro dele, mata o
+    subprocess (SIGTERM → grace de `_STUCK_JOB_GRACE_SECONDS` → SIGKILL) e levanta
+    `StuckJobError`. Matar o processo aqui (não cancelar a corrotina) é essencial:
+    o processo mora neste escopo e é ele quem segura o lock serializado (ADR-001) —
+    uma corrotina cancelada deixaria o subprocess órfão segurando o lock. `None`/0
+    = sem limite (comportamento histórico).
     """
     log.debug("Executando: %s", " ".join(cmd))
     async with _rclone_lock:
@@ -247,7 +275,11 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_b, stderr_b = await proc.communicate()
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            await _kill_stuck_proc(proc)
+            raise StuckJobError(timeout) from None
         rc = proc.returncode or 0
         stderr = stderr_b.decode("utf-8", errors="replace")
         if rc != 0:
@@ -256,6 +288,26 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
             if auth_err is not None:
                 raise auth_err
         return rc, stdout_b.decode("utf-8", errors="replace"), stderr
+
+
+async def _kill_stuck_proc(proc: asyncio.subprocess.Process) -> None:
+    """Encerra um subprocess estourado: SIGTERM, aguarda a graça, então SIGKILL.
+
+    Sempre faz o reap (`proc.wait()`) para não deixar zumbi. Best-effort: se o
+    processo já morreu entre o timeout e o terminate, `ProcessLookupError` é benigno.
+    """
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), _STUCK_JOB_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
 
 
 class RcloneEngine:
@@ -272,6 +324,17 @@ class RcloneEngine:
             *self.app.rclone.global_flags,
             *_FORCE_EMPTY_2FA,
         ]
+
+    def _job_timeout(self, folder: FolderConfig) -> float | None:
+        """Resolve o max-runtime efetivo do folder (#45): override per-folder > global.
+
+        `None` no folder = herda `rclone.max_job_runtime_seconds`; 0 em qualquer
+        nível = desligado (sem limite). Retorna `None` quando desligado.
+        """
+        raw = folder.max_job_runtime_seconds
+        if raw is None:
+            raw = self.app.rclone.max_job_runtime_seconds
+        return float(raw) if raw and raw > 0 else None
 
     async def auth_probe(self) -> bool:
         """Probe leve do backend para detectar falha de auth antes de um job real.
@@ -300,12 +363,14 @@ class RcloneEngine:
     # -----------------------------------------------------------------
     # Sincronização bidirecional de uma pasta "comum" (não-Git)
     # -----------------------------------------------------------------
-    async def _ensure_remote_dir(self, remote: str, name: str) -> bool:
+    async def _ensure_remote_dir(
+        self, remote: str, name: str, timeout: float | None = None
+    ) -> bool:
         """Cria o diretório remoto se não existir. É idempotente."""
         # via _base_cmd() para herdar global_flags + o `--protondrive-2fa ""`
         # forçado (#61): mkdir também toca o backend e faz cold reauth.
         cmd = self._base_cmd() + ["mkdir", remote]
-        rc, _out, err = await _run(cmd)
+        rc, _out, err = await _run(cmd, timeout=timeout)
         if rc != 0:
             summary, path = _capture_stderr("mkdir", name, err)
             log.error(
@@ -332,10 +397,11 @@ class RcloneEngine:
         local = local_override or folder.local_path
         remote = remote_uri_for(folder, self.app)
         marker = _state_marker_for(local, remote)
+        timeout = self._job_timeout(folder)
 
         local.mkdir(parents=True, exist_ok=True)
 
-        if not await self._ensure_remote_dir(remote, folder.name):
+        if not await self._ensure_remote_dir(remote, folder.name, timeout=timeout):
             return False
 
         cmd = self._base_cmd() + ["bisync", str(local), remote]
@@ -369,7 +435,7 @@ class RcloneEngine:
             log.info("[%s] Primeira sincronização — executando --resync.", folder.name)
             cmd += ["--resync"]
 
-        rc, _out, err = await _run(cmd)
+        rc, _out, err = await _run(cmd, timeout=timeout)
         if rc != 0:
             summary, path = _capture_stderr("bisync", folder.name, err)
             log.error(
@@ -396,7 +462,7 @@ class RcloneEngine:
         """
         remote = remote_uri_for(folder, self.app, rel_subpath)
         cmd = self._base_cmd() + ["copyto", str(bundle), remote, "--update"]
-        rc, _o, err = await _run(cmd)
+        rc, _o, err = await _run(cmd, timeout=self._job_timeout(folder))
         if rc != 0:
             summary, path = _capture_stderr(
                 "upload-bundle", folder.name, err, sub=rel_subpath
@@ -420,7 +486,7 @@ class RcloneEngine:
         remote = remote_uri_for(folder, self.app, rel_subpath)
         dest.parent.mkdir(parents=True, exist_ok=True)
         cmd = self._base_cmd() + ["copyto", remote, str(dest), "--update"]
-        rc, _o, err = await _run(cmd)
+        rc, _o, err = await _run(cmd, timeout=self._job_timeout(folder))
         if rc != 0:
             # "directory not found" / "object not found" significa que o
             # bundle ainda não existe na nuvem — não é erro.
