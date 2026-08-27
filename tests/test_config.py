@@ -105,6 +105,21 @@ def test_rclone_defaults(tmp_path):
     assert rclone.remote_root == "Sync"
     assert rclone.binary == "rclone"
     assert rclone.global_flags == []
+    # SP-T3 (#47/ADR-019): auto-recuperação de rc=7 stale-listings ON por default.
+    assert rclone.auto_resync_stale_listings is True
+
+
+def test_auto_resync_stale_listings_opt_out(tmp_path):
+    # WHERE auto_resync_stale_listings: false → knob respeitado (comportamento legado).
+    cfg = _write_yaml(tmp_path, """
+        rclone:
+          auto_resync_stale_listings: false
+        folders:
+          - name: docs
+            local_path: /tmp/docs
+            remote_subpath: Documents
+    """)
+    assert load_config(cfg).rclone.auto_resync_stale_listings is False
 
 
 def test_rclone_section_override(tmp_path):

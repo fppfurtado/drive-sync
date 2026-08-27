@@ -27,6 +27,14 @@ rclone:
   # legitimamente demora mais que isso, suba o valor OU use o override per-folder
   # abaixo — um sync legítimo morto por engano fica VISÍVEL como `[STUCK_JOB]`.
   max_job_runtime_seconds: 7200
+  # Auto-recuperação data-safe de rc=7 stale-listings (ADR-019, #47). Quando um
+  # bisync aborta com "cannot find prior Path1 or Path2 listings" (estado .lst
+  # morto por queda de rede/storm 5xx no meio de um bisync longo) E um dry-run
+  # prova que o --resync seria união no-op (0 transfers, 0 deleções), o daemon
+  # reconstrói o baseline sozinho em vez de ficar degradado até recovery manual.
+  # Gated por prova data-safe: qualquer divergência → NÃO age, permanece degradado.
+  # true (default). false = comportamento legado (loga BISYNC_FAIL, recovery manual).
+  auto_resync_stale_listings: true
 
 # -----------------------------------------------------------------------------
 # git_handling options (ADR-008):
