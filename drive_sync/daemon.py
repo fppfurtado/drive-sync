@@ -191,8 +191,7 @@ class SyncDaemon:
             if folder.git_handling == "auto":
                 success = await self._process_auto(folder)
             elif folder.git_handling == "bundle":
-                await self._sync_git_folder(folder)
-                success = True
+                success = await self._sync_git_folder(folder)
             else:  # "plain"
                 success = await self.engine.bisync_folder(folder)
         except StuckJobError as exc:
@@ -219,9 +218,8 @@ class SyncDaemon:
         Sucesso agregado por AND: falha em qualquer bundle individual OU no bisync
         do conteúdo restante derruba o ciclo do folder, permitindo que staleness
         (ADR-005) acione após threshold. Evita o cenário "repo local-only sem
-        backup" cego — diferente do modo `bundle` legado em _sync_git_folder que
-        engole falhas individuais (não regredido por simetria; comportamento
-        legado preexistente).
+        backup" cego. O modo `bundle` folder-level (_sync_git_folder) agrega da
+        mesma forma desde #40.
 
         - repos com remote → skip (vira --exclude no bisync)
         - repos sem remote → bundle (sincronizado via _bundle_single_repo)
@@ -262,10 +260,17 @@ class SyncDaemon:
     # ------------------------------------------------------------------
     # Fluxo para pastas Git: empacota e sobe somente o(s) bundle(s).
     # ------------------------------------------------------------------
-    async def _sync_git_folder(self, folder: FolderConfig) -> None:
+    async def _sync_git_folder(self, folder: FolderConfig) -> bool:
         """Itera repos sob folder.local_path e bundla cada um (modo `bundle`).
 
         Modo `auto` usa _bundle_single_repo direto a partir da classificação.
+
+        Retorna sucesso agregado por AND (#40): falha em qualquer bundle
+        individual OU no bisync-fallback derruba o ciclo do folder, alimentando
+        o staleness gate (ADR-005). Antes retornava None e cada retorno de
+        _bundle_single_repo era engolido — um ciclo com 0 uploads bem-sucedidos
+        marcava sucesso e zerava a janela de staleness, mascarando degradação
+        real. Simetria com _process_auto, que já agregava.
         """
         from .git_handler import find_git_repos, is_git_repo, is_linked_worktree
 
@@ -290,18 +295,19 @@ class SyncDaemon:
 
         if not repos:
             log.info("[%s] Sem repos Git aqui — caindo no fluxo bisync comum.", folder.name)
-            await self.engine.bisync_folder(folder)
-            return
+            return await self.engine.bisync_folder(folder)
 
+        all_success = True
         for repo in repos:
-            await self._bundle_single_repo(folder, repo)
+            if not await self._bundle_single_repo(folder, repo):
+                all_success = False
+        return all_success
 
     async def _bundle_single_repo(self, folder: FolderConfig, repo: Path) -> bool:
         """Bundle de um repo específico (compartilhado entre `bundle` e `auto`).
 
-        Retorna True em sucesso. Modo `auto` agrega via AND para alimentar
-        staleness ADR-005; modo `bundle` legado ignora o retorno (comportamento
-        preexistente em _sync_git_folder).
+        Retorna True em sucesso. Ambos os modos (`auto` e `bundle`) agregam via
+        AND para alimentar o staleness gate ADR-005 (#40).
         """
         from .git_handler import (
             bundle_path_for,

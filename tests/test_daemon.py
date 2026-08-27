@@ -99,11 +99,37 @@ async def test_plain_handling_calls_engine_bisync():
 async def test_bundle_handling_calls_sync_git_folder():
     folder = _folder(git_handling="bundle")
     daemon = SyncDaemon(_make_config([folder]))
-    daemon._sync_git_folder = AsyncMock()
+    daemon._sync_git_folder = AsyncMock(return_value=True)
 
     await daemon._process_folder(folder)
 
     daemon._sync_git_folder.assert_called_once_with(folder)
+
+
+async def test_bundle_handling_failure_propagates_and_skips_mark_success():
+    """#40: bundle com _sync_git_folder=False → _process_folder False e NÃO marca
+    sucesso (alimenta o staleness gate ADR-005; antes hardcodava success=True)."""
+    folder = _folder(git_handling="bundle", name="alpha")
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon._sync_git_folder = AsyncMock(return_value=False)
+
+    result = await daemon._process_folder(folder)
+
+    assert result is False
+    assert "alpha" not in daemon._last_successful_sync_at
+    assert "alpha" not in daemon._last_successful_sync_at_mono
+
+
+async def test_bundle_handling_success_marks_success():
+    """#40: bundle com _sync_git_folder=True → _process_folder True e marca sucesso."""
+    folder = _folder(git_handling="bundle", name="alpha")
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon._sync_git_folder = AsyncMock(return_value=True)
+
+    result = await daemon._process_folder(folder)
+
+    assert result is True
+    assert "alpha" in daemon._last_successful_sync_at
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +700,51 @@ async def test_sync_git_folder_skips_linked_worktrees(tmp_path):
     bundled = [call.args[1] for call in daemon._bundle_single_repo.call_args_list]
     assert main in bundled
     assert wt not in bundled
+
+
+def _init_repo(path: Path) -> None:
+    import subprocess
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+
+
+async def test_sync_git_folder_returns_false_when_repo_bundle_fails(tmp_path):
+    """#40: agregação AND — um _bundle_single_repo=False derruba o folder."""
+    _init_repo(tmp_path / "container" / "r1")
+    folder = FolderConfig(
+        name="c", local_path=tmp_path / "container", remote_subpath="c",
+        git_handling="bundle",
+    )
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon._bundle_single_repo = AsyncMock(return_value=False)
+
+    assert await daemon._sync_git_folder(folder) is False
+
+
+async def test_sync_git_folder_returns_true_when_all_repos_succeed(tmp_path):
+    """#40: todos os bundles OK → folder True (marca sucesso a montante)."""
+    _init_repo(tmp_path / "container" / "r1")
+    folder = FolderConfig(
+        name="c", local_path=tmp_path / "container", remote_subpath="c",
+        git_handling="bundle",
+    )
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon._bundle_single_repo = AsyncMock(return_value=True)
+
+    assert await daemon._sync_git_folder(folder) is True
+
+
+async def test_sync_git_folder_no_repos_propagates_bisync_fallback_result(tmp_path):
+    """#40: sem repos git → bisync-fallback e propaga seu resultado (antes: None)."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    folder = FolderConfig(
+        name="c", local_path=empty, remote_subpath="c", git_handling="bundle",
+    )
+    daemon = SyncDaemon(_make_config([folder]))
+    daemon.engine.bisync_folder = AsyncMock(return_value=False)
+
+    assert await daemon._sync_git_folder(folder) is False
 
 
 # ---------------------------------------------------------------------------
