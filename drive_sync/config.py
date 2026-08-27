@@ -397,6 +397,11 @@ class RcloneConfig:
     # serializado (ADR-001) do caso degenerado (14h stuck no incidente 2026-05-29).
     # 0 = desligado. Override per-folder via FolderConfig.max_job_runtime_seconds.
     max_job_runtime_seconds: int = 7200
+    # #47 / ADR-019: kill-switch da auto-recuperação data-safe de rc=7 stale-listings.
+    # true (default) = quando um bisync aborta stale-listings E um dry-run prova que
+    # o --resync é união no-op, o daemon auto-recupera; false = comportamento legado
+    # (loga BISYNC_FAIL, permanece degradado, recovery manual pelo playbook).
+    auto_resync_stale_listings: bool = True
 
 
 @dataclass
@@ -596,6 +601,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         infra_storm_threshold=int(rclone_raw.get("infra_storm_threshold", 5)),
         infra_window_seconds=float(rclone_raw.get("infra_window_seconds", 600.0)),
         max_job_runtime_seconds=int(rclone_raw.get("max_job_runtime_seconds", 7200)),
+        auto_resync_stale_listings=bool(
+            rclone_raw.get("auto_resync_stale_listings", True)
+        ),
     )
     if rclone.infra_storm_threshold < 1:
         raise ValueError(

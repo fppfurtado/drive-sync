@@ -56,6 +56,8 @@ rclone lsl proton:Sync/ > ~/.local/state/drive-sync/snapshots/pre-recovery-$(dat
 
 ## Recuperação rc=7 — stale-listings (benigno)
 
+> **Desde [ADR-019](../decisions/ADR-019-auto-resync-gated-rc7-stale-listings.md) (#47) o caso benigno auto-recupera.** Com `rclone.auto_resync_stale_listings: true` (default), o daemon roda `--resync --dry-run` ao detectar stale-listings e, **se** provar união no-op (as duas árvores batem), reconstrói o baseline sozinho — sem este procedimento manual. Confirme com `journalctl --user -u drive-sync --grep "BISYNC_AUTORESYNC"` (`recovered`). Este procedimento manual é o **fallback** para quando o auto-resync **não** agiu: kill-switch off (`skipped (disabled)`), divergência real detectada pelo dry-run (`skipped (divergent…)`), ou o resync auto falhou. No caso divergente, o auto-resync se recusa **por design** (data-safety) — trate como o [caso rc=1](#recuperação-rc1--too-many-deletes-perigoso): decida a direção conscientemente antes de forçar.
+
 O estado `.lst` morreu, mas os dados locais e remotos estão intactos. Recuperação = reconstruir o baseline.
 
 **Pré-check de integridade** (confirma que é o caso benigno — as árvores batem, não há divergência real):

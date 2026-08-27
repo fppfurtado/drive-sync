@@ -227,6 +227,50 @@ def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
     )
 
 
+# Assinatura stale-listings do bisync (SP-T2 · #47 · ADR-019): rc=7 cujo estado
+# `.lst` morreu (ex.: queda de rede / storm 5xx da Proton no meio de um bisync
+# longo). O rclone reporta "cannot find prior Path1 or Path2 listings" +
+# "Must run --resync to recover". Distinto de OUTRAS causas de rc=7 — ex.: colisão
+# case-insensitive (ADR-011), cujo abort NÃO casa estas frases e segue o
+# tratamento default de BISYNC_FAIL. Recuperável via --resync data-safe
+# (auto-recuperação gated em bisync_folder).
+_STALE_LISTINGS_RE = re.compile(
+    r"cannot find prior Path1 or Path2 listings|Must run --resync to recover"
+)
+
+
+def _is_stale_listings(stderr: str) -> bool:
+    """True se o stderr do rclone indica o abort stale-listings (baseline `.lst` morto).
+
+    Reconhece a assinatura específica do caso recuperável por `--resync`; outras
+    causas de rc=7 (ex.: case-duplicates, ADR-011) retornam False e seguem o
+    tratamento default de `[BISYNC_FAIL]`.
+    """
+    return _STALE_LISTINGS_RE.search(stderr) is not None
+
+
+# Parse do `bisync --resync --dry-run` (SP-T1 · SP-T4 · ADR-019): prova união
+# no-op. Como `--resync` é união (nunca deleta — F2), cada operação que o resync
+# real faria aparece no dry-run como uma linha `... as --dry-run is set`; o bloco
+# de stats fecha em `Transferred: 0 B / 0 B` no caso no-op. rc do dry-run é sempre
+# 0 (inútil como sinal). Amostras reais em docs/spikes/SP-T1-autoresync-dryrun-parse.md.
+_DRYRUN_WOULD_MUTATE_RE = re.compile(r"as --dry-run is set")
+_DRYRUN_ZERO_BYTES_RE = re.compile(r"Transferred:\s+0 B / 0 B")
+
+
+def _dryrun_resync_is_noop(output: str) -> bool:
+    """True se a saída de `bisync --resync --dry-run` prova união no-op (data-safe).
+
+    Requer AMBOS os sinais (SP-T1): NENHUMA linha `as --dry-run is set` (cada uma
+    seria uma cópia que o resync real faria) E o bloco `Transferred: 0 B / 0 B`.
+    Fail-safe por construção (C2/S2): ausência de qualquer sinal — output vazio,
+    formato inesperado, ou ≥1 would-be-mutation — retorna False → NÃO auto-recupera.
+    """
+    if _DRYRUN_WOULD_MUTATE_RE.search(output) is not None:
+        return False
+    return _DRYRUN_ZERO_BYTES_RE.search(output) is not None
+
+
 def _bisync_state_dir() -> Path:
     """Diretório onde o rclone guarda o estado das bisync (XDG)."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
@@ -317,6 +361,11 @@ class RcloneEngine:
             app.rclone.infra_storm_threshold,
             app.rclone.infra_window_seconds,
         )
+        # Guard 1-tentativa-por-episódio da auto-recuperação de rc=7 (ADR-019, #47):
+        # markers de pares com auto-resync já tentado no episódio corrente. Evita
+        # re-disparar o dry-run a cada ciclo num folder divergente preso. Limpo em
+        # QUALQUER sucesso de bisync; reseta no restart (novo processo → set vazio).
+        self._autoresync_attempted: set[Path] = set()
 
     def _base_cmd(self) -> list[str]:
         return [
@@ -381,6 +430,43 @@ class RcloneEngine:
         log.debug("[%s] Diretório remoto garantido: %s", name, remote)
         return True
 
+    async def _attempt_gated_autoresync(
+        self, folder: FolderConfig, base_cmd: list[str], timeout: float | None
+    ) -> bool:
+        """Auto-recuperação gated de rc=7 stale-listings (ADR-019, #47).
+
+        Prova, via `--resync --dry-run`, que o resync seria união no-op (data-safe,
+        C2) ANTES de reconstruir o baseline com o `--resync` real. Divergência ou
+        dry-run ambíguo → NÃO age (fail-safe: permanece degradado). `base_cmd` é o
+        cmd de bisync SEM `--resync` (flags/excludes live, git_handling-aware).
+        Retorna True só quando o `--resync` real reconstruiu o baseline (rc==0);
+        NÃO toca o marker (o tail de sucesso do caller faz). O guard de 1-tentativa
+        e a limpeza do marker são responsabilidade do caller.
+        """
+        log.info("[%s] [BISYNC_AUTORESYNC] attempted (rc=7 stale-listings)", folder.name)
+        _rc, out, err = await _run(base_cmd + ["--resync", "--dry-run"], timeout=timeout)
+        if not _dryrun_resync_is_noop(out + err):
+            log.warning(
+                "[%s] [BISYNC_AUTORESYNC] skipped (divergent: dry-run não provou "
+                "união no-op) — permanece degradado, recovery manual (playbook)",
+                folder.name,
+            )
+            return False
+        rc, _o, rerr = await _run(base_cmd + ["--resync"], timeout=timeout)
+        if rc != 0:
+            summary, path = _capture_stderr("bisync-autoresync", folder.name, rerr)
+            log.error(
+                "[%s] [BISYNC_AUTORESYNC] skipped (resync real falhou rc=%d): %s "
+                "(full stderr: %s)",
+                folder.name, rc, summary, path,
+            )
+            return False
+        log.info(
+            "[%s] [BISYNC_AUTORESYNC] recovered (baseline reconstruído via --resync)",
+            folder.name,
+        )
+        return True
+
     async def bisync_folder(
         self,
         folder: FolderConfig,
@@ -442,12 +528,37 @@ class RcloneEngine:
                 "[%s] [BISYNC_FAIL] rc=%d: %s (full stderr: %s)",
                 folder.name, rc, summary, path,
             )
-            # Em alguns erros, o rclone sugere `--resync` para recuperar.
-            # Não invocamos automaticamente para não causar perda de dados;
-            # apenas registramos com nível ERROR.
-            return False
+            # Auto-recuperação gated de rc=7 stale-listings (ADR-019, #47): quando o
+            # abort é stale-listings E um dry-run prova que o `--resync` seria união
+            # no-op, reconstrói o baseline em vez de ficar degradado indefinidamente.
+            # Exceção RESTRITA ao invariante "bisync errors do NOT auto-recover":
+            # divergência real ou dry-run ambíguo → NÃO age (data-safety C2). Guard
+            # de 1-tentativa-por-episódio evita re-disparar o dry-run a cada ciclo.
+            if (
+                self.app.rclone.auto_resync_stale_listings
+                and _is_stale_listings(err)
+                and marker not in self._autoresync_attempted
+            ):
+                self._autoresync_attempted.add(marker)
+                try:
+                    recovered = await self._attempt_gated_autoresync(folder, cmd, timeout)
+                except Exception:
+                    # Attempt abortado por exceção (ex.: AuthDegradedError de storm
+                    # remanescente — o mesmo storm que causou o rc=7; ou StuckJobError):
+                    # NENHUM veredito no-op/divergente foi alcançado, então NÃO consumiu
+                    # a tentativa do episódio. Libera o guard para re-tentar no próximo
+                    # ciclo e re-levanta (o daemon trata auth/stuck). Sem este discard,
+                    # um blip transitório barraria a auto-recuperação até o restart.
+                    self._autoresync_attempted.discard(marker)
+                    raise
+                if not recovered:
+                    return False
+                # Recuperado — cai no tail de sucesso abaixo.
+            else:
+                return False
 
         marker.touch()
+        self._autoresync_attempted.discard(marker)
         log.info("[%s] bisync concluído com sucesso.", folder.name)
         return True
 
