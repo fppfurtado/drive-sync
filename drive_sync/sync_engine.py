@@ -258,7 +258,7 @@ class RcloneEngine:
     def _base_cmd(self) -> list[str]:
         return [self.app.rclone.binary, *self.app.rclone.global_flags]
 
-    async def auth_probe(self) -> None:
+    async def auth_probe(self) -> bool:
         """Probe leve do backend para detectar falha de auth antes de um job real.
 
         Levanta AuthDegradedError quando o backend reporta auth quebrada.
@@ -271,11 +271,16 @@ class RcloneEngine:
         remote = f"{self.app.rclone.remote_name}:"
         cmd = self._base_cmd() + ["about", remote]
         try:
-            await _run(cmd)
+            rc, _out, _err = await _run(cmd)
+            # rc==0 é sucesso real; rc≠0 sem AuthDegradedError (ex.: 5xx do
+            # provedor) NÃO é sucesso — SP-T5 depende disso para não retomar
+            # prematuramente enquanto o provedor ainda está em storm.
+            return rc == 0
         except AuthDegradedError:
             raise
         except Exception as exc:  # noqa: BLE001
             log.debug("auth_probe falhou (não-auth): %s", exc)
+            return False
 
     # -----------------------------------------------------------------
     # Sincronização bidirecional de uma pasta "comum" (não-Git)

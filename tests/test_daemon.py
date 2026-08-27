@@ -14,8 +14,17 @@ from drive_sync.config import (
     RcloneConfig,
     WatcherConfig,
 )
-from drive_sync.daemon import SyncDaemon, _compose_degraded_reason
-from drive_sync.sync_engine import AuthDegradedError
+from drive_sync.daemon import (
+    _INFRA_ESCALATE_AFTER,
+    SyncDaemon,
+    _compose_degraded_reason,
+)
+from drive_sync.sync_engine import (
+    AuthDegradedError,
+    _configure_infra_detection,
+    _record_infra_signals,
+    _reset_infra_window,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -692,3 +701,68 @@ def test_degraded_reason_genuine_credential_unchanged():
     # Kind de credencial genuína mantém o formato original.
     reason = _compose_degraded_reason("invalid_credentials", 8002, "tail")
     assert reason == "invalid_credentials (Code=8002) — tail: tail"
+
+
+# ---------------------------------------------------------------------------
+# SP-T5 — auto-resume gated de proton_infra (_probe_while_degraded)
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_resumes_proton_infra_on_probe_success():
+    # EARS SP-T5: WHILE degraded com proton_infra, WHEN o probe tem sucesso,
+    # the system SHALL retomar os workers sem restart manual.
+    _reset_infra_window()
+    daemon = SyncDaemon(_make_config())
+    daemon._enter_degraded("proton_infra (Code=8002) …", kind="proton_infra")
+    daemon.engine.auth_probe = AsyncMock(return_value=True)
+
+    await daemon._probe_while_degraded()
+
+    assert not daemon._degraded.is_set()
+    assert daemon._degraded_kind is None
+
+
+async def test_probe_keeps_genuine_kind_paused():
+    # EARS SP-T5: WHILE degraded com kind genuíno, the system SHALL permanecer
+    # pausado (nem faz probe — preserva o "sem auto-resume" do ADR-003).
+    _reset_infra_window()
+    daemon = SyncDaemon(_make_config())
+    daemon._enter_degraded("invalid_credentials (Code=8002) …", kind="invalid_credentials")
+    daemon.engine.auth_probe = AsyncMock(return_value=True)
+
+    await daemon._probe_while_degraded()
+
+    assert daemon._degraded.is_set()
+    daemon.engine.auth_probe.assert_not_called()
+
+
+async def test_probe_stays_proton_infra_while_storm_active():
+    # Provedor ainda em storm (janela cheia): probes falham mas NÃO escala.
+    daemon = SyncDaemon(_make_config())
+    daemon._enter_degraded("proton_infra (Code=8002) …", kind="proton_infra")
+    daemon.engine.auth_probe = AsyncMock(return_value=False)
+    _reset_infra_window()
+    _configure_infra_detection(threshold=3, window_seconds=600.0)
+    for _ in range(3):
+        _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
+
+    for _ in range(_INFRA_ESCALATE_AFTER + 2):
+        await daemon._probe_while_degraded()
+
+    assert daemon._degraded.is_set()
+    assert daemon._degraded_kind == "proton_infra"
+
+
+async def test_probe_escalates_when_provider_healthy_but_auth_keeps_failing():
+    # Provedor saudável (janela vazia) + auth segue falhando N vezes → escala
+    # para auth_uncertain, mas PERMANECE pausado (anti-falso-positivo).
+    _reset_infra_window()
+    daemon = SyncDaemon(_make_config())
+    daemon._enter_degraded("proton_infra (Code=8002) …", kind="proton_infra")
+    daemon.engine.auth_probe = AsyncMock(return_value=False)
+
+    for _ in range(_INFRA_ESCALATE_AFTER):
+        await daemon._probe_while_degraded()
+
+    assert daemon._degraded.is_set()
+    assert daemon._degraded_kind == "auth_uncertain"

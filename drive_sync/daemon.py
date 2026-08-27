@@ -20,10 +20,20 @@ from pathlib import Path
 from .config import AppConfig, FolderConfig
 from .git_handler import GitHandler
 from .notifier import Notifier
-from .sync_engine import AuthDegradedError, RcloneEngine, remote_uri_for
+from .sync_engine import (
+    AuthDegradedError,
+    RcloneEngine,
+    _infra_storm_active,
+    remote_uri_for,
+)
 from .watcher import FilesystemWatcher, WatchLimitError
 
 log = logging.getLogger(__name__)
+
+# SP-T5: nº de probes de auth falhados (com provedor saudável — janela de 5xx
+# vazia) antes de escalar um degraded proton_infra para "auth_uncertain"
+# (provável credencial genuína, reauth pode ser necessário).
+_INFRA_ESCALATE_AFTER = 3
 
 
 def _compose_degraded_reason(kind: str, code: int, stderr_tail: str) -> str:
@@ -55,6 +65,10 @@ class SyncDaemon:
         # Pause-on-failure de auth: workers drenam fila enquanto setado.
         self._degraded = asyncio.Event()
         self._degraded_reason: str | None = None
+        # SP-T5: kind classificado do degraded atual + contador de probes de
+        # auth falhados de proton_infra (para o auto-resume gated e a escalada).
+        self._degraded_kind: str | None = None
+        self._infra_probe_failures: int = 0
         # Cooldown por folder (ADR-004): janela conta from-start; tasks diferidas
         # re-enfileiram no fim da janela. Sem persistência cross-restart.
         self._last_sync_at: dict[str, float] = {}
@@ -78,17 +92,64 @@ class SyncDaemon:
         # Workers e periodic full-sync seguem; só a detecção em tempo real cai.
         self._watcher_degraded_reason: str | None = None
 
-    def _enter_degraded(self, reason: str) -> None:
+    def _enter_degraded(self, reason: str, kind: str | None = None) -> None:
         """Transiciona para estado degraded — idempotente.
 
         Atômico entre tasks por ser síncrono (sem await entre is_set e set).
         Inserir await aqui exige asyncio.Lock para preservar o invariante.
+        `kind` guarda a classe (SP-T5) — proton_infra é auto-resumível gated.
         """
         if self._degraded.is_set():
             return
         self._degraded_reason = reason
+        self._degraded_kind = kind
+        self._infra_probe_failures = 0
         self._degraded.set()
         self._notifier.degraded(reason)
+
+    def _resume_from_degraded(self) -> None:
+        """Limpa o estado degraded e re-sinaliza STATUS (SP-T5 auto-resume)."""
+        self._degraded.clear()
+        self._degraded_reason = None
+        self._degraded_kind = None
+        self._infra_probe_failures = 0
+        self._notifier.send_status(self._compose_status_payload())
+
+    def _escalate_proton_infra(self) -> None:
+        """Escala proton_infra → auth_uncertain: provedor saudável mas auth
+        segue falhando após N probes → provável credencial genuína. Permanece
+        PAUSADO (não limpa _degraded) e re-sinaliza (SP-T5 anti-falso-positivo)."""
+        self._degraded_kind = "auth_uncertain"
+        self._degraded_reason = (
+            f"auth_uncertain — provedor saudável mas auth ainda falha após "
+            f"{self._infra_probe_failures} probes; provável credencial genuína "
+            "(reauth pode ser necessário)"
+        )
+        self._notifier.degraded(self._degraded_reason)
+        self._notifier.send_status(self._compose_status_payload())
+
+    async def _probe_while_degraded(self) -> None:
+        """SP-T5: auto-resume gated de proton_infra.
+
+        proton_infra → probe leve; sucesso REAL (rc==0) retoma os workers sem
+        restart manual; falha persistente com provedor saudável (janela de 5xx
+        vazia) escala para credencial-genuína. Kind genuíno → permanece pausado
+        (nem sequer faz probe — preserva o "sem auto-resume" do ADR-003)."""
+        if self._degraded_kind != "proton_infra":
+            return
+        try:
+            ok = await self.engine.auth_probe()
+        except AuthDegradedError:
+            ok = False
+        if ok:
+            self._resume_from_degraded()
+            return
+        self._infra_probe_failures += 1
+        if (
+            not _infra_storm_active()
+            and self._infra_probe_failures >= _INFRA_ESCALATE_AFTER
+        ):
+            self._escalate_proton_infra()
 
     # ------------------------------------------------------------------
     # Roteamento de uma tarefa: três modos possíveis.
@@ -312,7 +373,8 @@ class SyncDaemon:
                     await self._process_folder(folder)
             except AuthDegradedError as exc:
                 self._enter_degraded(
-                    _compose_degraded_reason(exc.kind, exc.code, exc.stderr_tail)
+                    _compose_degraded_reason(exc.kind, exc.code, exc.stderr_tail),
+                    kind=exc.kind,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.exception("[%s] Erro inesperado: %s", folder.name, exc)
@@ -421,14 +483,19 @@ class SyncDaemon:
                 return  # stop solicitado
             except asyncio.TimeoutError:
                 pass
-            # Skip enquanto degraded: backend sabidamente quebrado não traz
-            # informação nova e gasta rate-limit (pode aprofundar CAPTCHA gate).
+            # Degraded: kind genuíno permanece pausado (backend sabidamente
+            # quebrado não traz info nova e gasta rate-limit). proton_infra é
+            # auto-resumível gated — SP-T5 delega ao _probe_while_degraded.
             if self._degraded.is_set():
+                await self._probe_while_degraded()
                 continue
             try:
                 await self.engine.auth_probe()
             except AuthDegradedError as exc:
-                self._enter_degraded(f"{exc.kind} (Code={exc.code}) — tail: {exc.stderr_tail}")
+                self._enter_degraded(
+                    _compose_degraded_reason(exc.kind, exc.code, exc.stderr_tail),
+                    kind=exc.kind,
+                )
 
     def _check_watcher_liveness(self) -> None:
         """Watcher morto em runtime degrada para poll-only com sinal (#20/ADR-013).
