@@ -92,6 +92,8 @@ Verifique a [recuperação](#verificação-comum). Se o pré-check de integridad
 
 O bisync viu >50% dos itens do baseline sumirem do Path1 (local) e travou o freio de segurança. **A recuperação depende da sua INTENÇÃO** com aqueles itens. Diagnostique primeiro; só então escolha o branch.
 
+> **O daemon sinaliza este abort com advice safe (#52).** Ao detectar `too many deletes`, o daemon emite um log `[BISYNC_SAFETY_ABORT]` que **não** ecoa a dica `--force` cega do rclone e aponta para este branch. Confirme com `journalctl --user -u drive-sync --grep "BISYNC_SAFETY_ABORT"`. É só sinalização — a recuperação continua manual e consciente (nenhuma auto-cura no rc=1; diferente do rc=7 benigno de ADR-019).
+
 ### Passo 1 — Diagnostique: o que exatamente "sumiu"?
 
 O safety abort compara o scan atual de Path1 contra o baseline `.lst`. Veja quais paths estão no baseline e não no scan novo:
