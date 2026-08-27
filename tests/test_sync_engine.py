@@ -93,6 +93,14 @@ def _mkdir_calls(captured: list[list[str]]) -> list[list[str]]:
     return [c for c in captured if "mkdir" in c]
 
 
+def _carries_empty_2fa(cmd: list[str]) -> bool:
+    """True se o cmd passa `--protondrive-2fa` seguido de string vazia (#61/SP-T7)."""
+    for i, tok in enumerate(cmd):
+        if tok == "--protondrive-2fa":
+            return i + 1 < len(cmd) and cmd[i + 1] == ""
+    return False
+
+
 # ---------------------------------------------------------------------------
 # remote_uri_for
 # ---------------------------------------------------------------------------
@@ -677,3 +685,49 @@ def test_infra_window_prunes_expired_entries():
     assert _infra_storm_active() is False  # podada → 0 >= 1 é False
     _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
     assert _infra_storm_active() is True  # entrada fresca conta → 1 >= 1
+
+
+# ---------------------------------------------------------------------------
+# #61 / SP-T7 (J4) — força `--protondrive-2fa ""` em TODA chamada rclone.
+# Um `2fa` estático no rclone.conf é inútil no cold reauth e só produz o `8002`
+# enganoso; o flag explícito-vazio sobrescreve o config SEM escrever o arquivo
+# (dissolve a corrida de escrita — o motivo do defer original de SP-T7).
+# ---------------------------------------------------------------------------
+
+def test_base_cmd_forces_empty_2fa():
+    engine = RcloneEngine(_app())
+    cmd = engine._base_cmd()
+    assert _carries_empty_2fa(cmd)
+    # explícito-vazio (não ausente): o token logo após o flag é "" exatamente.
+    idx = cmd.index("--protondrive-2fa")
+    assert cmd[idx + 1] == ""
+
+
+def test_base_cmd_preserves_global_flags_alongside_2fa():
+    app = _app()
+    app.rclone.global_flags = ["--transfers", "4"]
+    engine = RcloneEngine(app)
+    cmd = engine._base_cmd()
+    assert "--transfers" in cmd and "4" in cmd
+    assert _carries_empty_2fa(cmd)
+
+
+async def test_all_rclone_calls_carry_empty_2fa(tmp_path, monkeypatch):
+    """mkdir E bisync — todos os sites de invocação levam o flag. mkdir era o
+    único que bypassava _base_cmd() antes de #61; o teste trava a regressão."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    engine = RcloneEngine(_app())
+    folder = _folder(local_path=tmp_path / "local")
+    captured: list[list[str]] = []
+
+    async def fake_run(cmd):
+        captured.append(cmd)
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        await engine.bisync_folder(folder)
+
+    assert _mkdir_calls(captured), "mkdir deve ter sido chamado"
+    assert _bisync_calls(captured), "bisync deve ter sido chamado"
+    for cmd in captured:
+        assert _carries_empty_2fa(cmd), f"cmd sem --protondrive-2fa vazio: {cmd}"

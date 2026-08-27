@@ -31,6 +31,17 @@ log = logging.getLogger(__name__)
 # (rclone#7381, ADR-001). Pode ser removido se o backend migrar para lib/oauthutil.
 _rclone_lock = asyncio.Lock()
 
+# #61 / SP-T7 (J4): força o campo `2fa` do backend protondrive a vazio em TODA
+# invocação rclone. Um `2fa` estático persistido no rclone.conf é inútil no cold
+# reauth (o TOTP de ~30s expira muito antes de qualquer cold reauth real) e só
+# produz o `8002` enganoso ao ser re-submetido expirado (finding SP-T1). Passar o
+# flag explícito-vazio sobrescreve o valor do config SEM que o drive-sync jamais
+# escreva o rclone.conf — dissolve a corrida de escrita com o rclone (que reescreve
+# tokens no mesmo arquivo), o motivo do defer original de SP-T7. Recovery de 2FA
+# genuíno passa a ser reauth interativo (código usado ao vivo, nunca persistido),
+# ver ADR-017 (emenda o playbook de recovery do ADR-003).
+_FORCE_EMPTY_2FA = ["--protondrive-2fa", ""]
+
 # Tabela canônica dos pares (code, status) reconhecidos pelo classificador.
 # Origem empírica de cada par:
 # - (8002, 422): incidente 2026-05-11 — Code=8002 em /api/auth/v4/2fa ("Incorrect login credentials").
@@ -256,7 +267,11 @@ class RcloneEngine:
         )
 
     def _base_cmd(self) -> list[str]:
-        return [self.app.rclone.binary, *self.app.rclone.global_flags]
+        return [
+            self.app.rclone.binary,
+            *self.app.rclone.global_flags,
+            *_FORCE_EMPTY_2FA,
+        ]
 
     async def auth_probe(self) -> bool:
         """Probe leve do backend para detectar falha de auth antes de um job real.
@@ -287,7 +302,9 @@ class RcloneEngine:
     # -----------------------------------------------------------------
     async def _ensure_remote_dir(self, remote: str, name: str) -> bool:
         """Cria o diretório remoto se não existir. É idempotente."""
-        cmd = [self.app.rclone.binary, "mkdir", remote]
+        # via _base_cmd() para herdar global_flags + o `--protondrive-2fa ""`
+        # forçado (#61): mkdir também toca o backend e faz cold reauth.
+        cmd = self._base_cmd() + ["mkdir", remote]
         rc, _out, err = await _run(cmd)
         if rc != 0:
             summary, path = _capture_stderr("mkdir", name, err)

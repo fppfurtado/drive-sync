@@ -10,7 +10,13 @@ Draft-never-freeze aplica.
 - Spec version: v1
 - Source: Problem Brief `briefs/infra-flakiness-vs-real-failure.md` v1 (PRD pulado — ver cabeçalho)
 - Status: FROZEN
-- Amendments: none
+- Amendments:
+  - 2026-08-27 (#61) — SP-T7/J4 des-deferido e **mecanismo revisto**. O SP-T1 (spike) surfaçou
+    que "zerar o campo no rclone.conf" corre com o rclone reescrevendo tokens no mesmo arquivo
+    (o defer). Mecanismo trocado para **forçar `--protondrive-2fa ""` (explícito-vazio) em toda
+    invocação rclone via `_base_cmd()`** — sobrescreve o campo estático SEM jamais escrever o
+    rclone.conf (zero corrida). EARS de SP-T7 reescrito de acordo. Recovery de 2FA genuíno passa a
+    reauth interativo (ADR-017, emenda o playbook do ADR-003). Aprovado pelo operador (opção B).
 
 ## Design
 
@@ -55,7 +61,8 @@ A mudança introduz **memória de curta-duração** para detectar co-ocorrência
 - SP-T4: roteamento/mensagem de recuperação por kind — `proton_infra` sinaliza degraded SEM instruir reauth; kinds genuínos inalterados. — implements `:J2` (S2) — acceptance (EARS): "WHEN o daemon entra em degraded com `kind=proton_infra`, the system SHALL emitir STATUS/notify que NÃO instrui refazer auth/2FA." — depends on: SP-T3
 - SP-T5: auto-resume gated de `proton_infra` via `_auth_probe_loop` (probe OK → resume; kinds genuínos seguem pausados; escalada para genuíno após M falhas com provedor saudável). — implements `:J2`/`:J3` (S3) — acceptance (EARS): "WHILE degraded com `kind=proton_infra`, WHEN um auth-probe leve tem sucesso, the system SHALL retomar os workers sem restart manual; WHILE degraded com kind genuíno, the system SHALL permanecer pausado." — depends on: SP-T4
 - SP-T6: ADR emendando ADR-003 (classe `proton_infra` + auto-resume gated + precedência de STATUS). — implements decisão arquitetural de SP-T5 — acceptance (EARS): "WHEN o ADR é escrito, the system SHALL registrar a exceção ao invariante 'sem auto-resume' restrita a `proton_infra` e sua justificativa." — depends on: SP-T5
-- SP-T7 (gated em SP-T1): fix do landmine — limpar/zerar o campo `2fa` estático pós-auth bem-sucedida, SE SP-T1 confirmar seguro. — implements `:J4` (S4) — acceptance (EARS): "IF SP-T1 confirmou que o backend NÃO exige `2fa` em cold reauth, THEN WHEN uma auth tem sucesso, the system SHALL zerar o campo `2fa` do rclone.conf." — depends on: SP-T1
+- SP-T7 (gated em SP-T1; **emendado #61**): fix do landmine — forçar `--protondrive-2fa ""` em toda invocação rclone, tornando qualquer `2fa` estático persistido inerte SEM escrever o rclone.conf. — implements `:J4` (S4) — acceptance (EARS): "WHEN o drive-sync invoca o rclone (qualquer subcomando que toca o backend protondrive), the system SHALL passar `--protondrive-2fa` com valor de string vazia, E o drive-sync SHALL NÃO escrever o `rclone.conf` para manipular o campo `2fa`." — depends on: SP-T1
+  - Nota do finding SP-T1 (corrige a premissa do EARS original): o backend **exige** `2fa` no cold reauth com 2FA-enabled, MAS um valor **estático** nunca satisfaz esse requisito na prática (TOTP ~30s expira antes do cold reauth). Logo forçá-lo vazio não perde função real e converte o `8002` enganoso num erro claro "2FA required".
 
 ## Coverage check (every in-scope J*/S* -> ≥1 task)
 - J1 (S1) -> SP-T2, SP-T3
