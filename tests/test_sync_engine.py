@@ -24,6 +24,8 @@ from drive_sync.sync_engine import (
     RcloneEngine,
     _classify_rclone_stderr,
     _is_stale_listings,
+    _dryrun_resync_is_noop,
+    _state_marker_for,
     _configure_infra_detection,
     _infra_storm_active,
     _infra_window,
@@ -847,3 +849,144 @@ async def test_bisync_passes_folder_timeout_to_every_run(tmp_path, monkeypatch):
 
     assert seen, "esperava ao menos mkdir + bisync"
     assert all(t == 111.0 for t in seen), f"timeout não propagado: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# Auto-recuperação gated de rc=7 stale-listings (SP-T4 · #47 · ADR-019)
+# ---------------------------------------------------------------------------
+
+# Amostras de dry-run (SP-T1 — docs/spikes/SP-T1-autoresync-dryrun-parse.md).
+_DRYRUN_NOOP = (
+    "NOTICE: - Path2  Resync is copying files to  - Path1\n"
+    "NOTICE: - Path1  Resync is copying files to  - Path2\n"
+    "Transferred:   \t          0 B / 0 B, -, 0 B/s, ETA -\n"
+    "Checks:                 6 / 6, 100%, Listed 16\n"
+)
+_DRYRUN_DIVERGENT = (
+    "NOTICE: - Path2  Resync is copying files to  - Path1\n"
+    "NOTICE: only-remote.txt: Skipped copy as --dry-run is set (size 18)\n"
+    "Transferred:   \t         23 B / 23 B, 100%, 0 B/s, ETA -\n"
+    "Transferred:            1 / 1, 100%\n"
+)
+_STALE_STDERR = (
+    "ERROR : Bisync critical error: cannot find prior Path1 or Path2 listings\n"
+    "ERROR : Bisync aborted. Must run --resync to recover."
+)
+
+
+def _dryrun_calls(captured):
+    return [c for c in captured if "bisync" in c and "--dry-run" in c]
+
+
+def _real_resync_calls(captured):
+    return [c for c in captured if "bisync" in c and "--resync" in c and "--dry-run" not in c]
+
+
+def _make_stuck_fake_run(captured, *, dryrun_out, resync_rc=0):
+    """fake _run: mkdir ok; bisync plano → rc=7 stale; --dry-run → dryrun_out (stderr);
+    --resync real → resync_rc."""
+    async def fake_run(cmd, timeout=None):
+        captured.append(cmd)
+        if "mkdir" in cmd:
+            return (0, "", "")
+        if "bisync" in cmd:
+            if "--dry-run" in cmd:
+                return (0, "", dryrun_out)
+            if "--resync" in cmd:
+                return (resync_rc, "", "" if resync_rc == 0 else "resync failed")
+            return (7, "", _STALE_STDERR)  # bisync plano preso
+        return (0, "", "")
+    return fake_run
+
+
+def _prime_marker(app, folder):
+    marker = _state_marker_for(folder.local_path, remote_uri_for(folder, app))
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()  # marker existe → bisync não é first-run (simula folder preso)
+    return marker
+
+
+def test_dryrun_resync_is_noop_parse():
+    assert _dryrun_resync_is_noop(_DRYRUN_NOOP) is True
+    assert _dryrun_resync_is_noop(_DRYRUN_DIVERGENT) is False
+    # Fail-safe: output vazio / sem sinal de stats → NÃO no-op.
+    assert _dryrun_resync_is_noop("") is False
+    assert _dryrun_resync_is_noop("Transferred: 5 B / 5 B") is False
+
+
+async def test_autoresync_recovers_on_noop_dryrun(tmp_path, monkeypatch):
+    # S1: rc=7 stale-listings + dry-run prova no-op → roda --resync real → sucesso
+    # na mesma chamada, sem intervenção manual.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    with patch("drive_sync.sync_engine._run", _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_NOOP)):
+        result = await engine.bisync_folder(folder)
+    assert result is True
+    assert len(_dryrun_calls(captured)) == 1, "esperava um pre-check dry-run"
+    assert len(_real_resync_calls(captured)) == 1, "esperava um --resync real pós-prova"
+
+
+async def test_autoresync_skips_on_divergent_dryrun(tmp_path, monkeypatch):
+    # S2/C2: dry-run reporta transfer/would-copy (divergência) → NÃO dispara
+    # --resync real; permanece degradado. ZERO transfer/delete pela auto-recuperação.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    with patch("drive_sync.sync_engine._run", _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_DIVERGENT)):
+        result = await engine.bisync_folder(folder)
+    assert result is False
+    assert len(_dryrun_calls(captured)) == 1, "esperava o pre-check dry-run"
+    assert _real_resync_calls(captured) == [], "NÃO deveria disparar --resync real em divergência"
+
+
+async def test_autoresync_guard_one_attempt_per_episode(tmp_path, monkeypatch):
+    # D4: 2 ciclos presos no mesmo episódio → só o 1º tenta o dry-run; o 2º pula
+    # (guard), sem re-disparar o dry-run num folder divergente.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    fake = _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_DIVERGENT)
+    with patch("drive_sync.sync_engine._run", fake):
+        r1 = await engine.bisync_folder(folder)
+        r2 = await engine.bisync_folder(folder)
+    assert r1 is False and r2 is False
+    assert len(_dryrun_calls(captured)) == 1, "2º ciclo não deveria re-tentar o dry-run (guard)"
+
+
+async def test_autoresync_disabled_by_killswitch(tmp_path, monkeypatch):
+    # D5: auto_resync_stale_listings=False → comportamento legado (nenhum dry-run).
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    app.rclone.auto_resync_stale_listings = False
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    with patch("drive_sync.sync_engine._run", _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_NOOP)):
+        result = await engine.bisync_folder(folder)
+    assert result is False
+    assert _dryrun_calls(captured) == [], "kill-switch off → nenhum dry-run"
+
+
+async def test_autoresync_guard_cleared_on_success(tmp_path, monkeypatch):
+    # Guard limpo em sucesso: após recuperar, o marker sai do set → um novo episódio
+    # preso ganha tentativa fresca.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    marker = _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    with patch("drive_sync.sync_engine._run", _make_stuck_fake_run(captured, dryrun_out=_DRYRUN_NOOP)):
+        await engine.bisync_folder(folder)
+    assert marker not in engine._autoresync_attempted, "sucesso deve limpar o guard"
