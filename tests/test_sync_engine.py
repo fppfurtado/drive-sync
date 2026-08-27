@@ -18,13 +18,35 @@ from drive_sync.config import (
     WatcherConfig,
 )
 from drive_sync.sync_engine import (
+    _DEFAULT_INFRA_STORM_THRESHOLD,
+    _DEFAULT_INFRA_WINDOW_SECONDS,
     AuthDegradedError,
     RcloneEngine,
     _classify_rclone_stderr,
+    _configure_infra_detection,
+    _infra_storm_active,
+    _infra_window,
+    _record_infra_signals,
+    _reset_infra_window,
     _run,
     _state_marker_for,
     remote_uri_for,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_infra_state():
+    # Estado module-level (janela de 5xx + config do detector) persiste entre
+    # testes; reseta para não vazar storm/threshold de um teste para outro.
+    _reset_infra_window()
+    _configure_infra_detection(
+        _DEFAULT_INFRA_STORM_THRESHOLD, _DEFAULT_INFRA_WINDOW_SECONDS
+    )
+    yield
+    _reset_infra_window()
+    _configure_infra_detection(
+        _DEFAULT_INFRA_STORM_THRESHOLD, _DEFAULT_INFRA_WINDOW_SECONDS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -577,3 +599,81 @@ async def test_auth_probe_silences_non_auth_error():
 
     with patch("drive_sync.sync_engine._run", fake_run):
         await engine.auth_probe()  # não deve levantar
+
+
+# ---------------------------------------------------------------------------
+# SP-T2 — janela de flakiness transitória (_record_infra_signals) · #35 + #46
+# ---------------------------------------------------------------------------
+
+
+def test_record_infra_signals_registers_one_timestamp_per_5xx():
+    # EARS SP-T2: WHEN um _run retorna rc≠0 com N ocorrências Status=5xx no
+    # stderr, the system SHALL registrar N timestamps na janela.
+    _reset_infra_window()
+    stderr = (
+        "503 GET https://drive-api.proton.me/core/v4/users: 503 Service "
+        "Unavailable (Code=0, Status=503)\n"
+        "502 POST https://drive-api.proton.me/auth/v4/info: 502 Bad Gateway "
+        "(Code=0, Status=502)\n"
+        "500 GET https://zrh-storage.proton.me/storage/blocks: Internal server "
+        "error (Code=500, Status=500)"
+    )
+    n = _record_infra_signals(stderr)
+    assert n == 3
+    assert len(_infra_window) == 3
+
+
+def test_record_infra_signals_ignores_non_5xx():
+    # Par auth 8002/422 (não-5xx) não polui a janela.
+    _reset_infra_window()
+    stderr = "422 POST https://drive-api.proton.me/auth/v4 (Code=8002, Status=422)"
+    n = _record_infra_signals(stderr)
+    assert n == 0
+    assert len(_infra_window) == 0
+
+
+# ---------------------------------------------------------------------------
+# SP-T3 — classificação context-aware (par auth × storm de 5xx) · #35 + #46
+# ---------------------------------------------------------------------------
+
+
+def test_classify_8002_during_storm_is_proton_infra():
+    # EARS SP-T3: IF um par auth casa E count(janela) >= threshold, THEN
+    # classificar kind=proton_infra (colateral da flakiness transitória).
+    _configure_infra_detection(threshold=3, window_seconds=600.0)
+    for _ in range(3):
+        _record_infra_signals("... 503 Service Unavailable (Code=0, Status=503)")
+    err = _classify_rclone_stderr(_STDERR_8002)
+    assert err is not None
+    assert err.kind == "proton_infra"
+    assert err.code == 8002  # o code original é preservado
+
+
+def test_classify_8002_isolated_stays_invalid_credentials():
+    # EARS SP-T3: IF a janela está abaixo do threshold, THEN manter o kind de
+    # credencial (8002 isolado, sem storm precedente).
+    _configure_infra_detection(threshold=3, window_seconds=600.0)
+    err = _classify_rclone_stderr(_STDERR_8002)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
+
+
+def test_classify_storm_below_threshold_stays_credential():
+    # Storm parcial (abaixo do threshold) não reclassifica.
+    _configure_infra_detection(threshold=5, window_seconds=600.0)
+    for _ in range(4):
+        _record_infra_signals("... (Code=0, Status=502)")
+    err = _classify_rclone_stderr(_STDERR_8002)
+    assert err.kind == "invalid_credentials"
+
+
+def test_infra_window_prunes_expired_entries():
+    # F2 (Review): a janela é DESLIZANTE — entradas mais velhas que
+    # window_seconds são podadas por _infra_storm_active. Sem a poda, um storm
+    # antigo contaria para sempre.
+    _reset_infra_window()
+    _configure_infra_detection(threshold=1, window_seconds=600.0)
+    _infra_window.append(time.monotonic() - 10_000)  # entrada expirada
+    assert _infra_storm_active() is False  # podada → 0 >= 1 é False
+    _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
+    assert _infra_storm_active() is True  # entrada fresca conta → 1 >= 1

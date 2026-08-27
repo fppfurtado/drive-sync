@@ -17,6 +17,8 @@ import hashlib
 import logging
 import os
 import re
+import time
+from collections import deque
 from pathlib import Path
 
 from .config import AppConfig, FolderConfig
@@ -57,6 +59,62 @@ _AUTH_ENDPOINT_RE = re.compile(r"(?:/api)?/auth/v4")
 
 # Re-extrai (code, status) do match já validado, para lookup do kind em _AUTH_CODES.
 _AUTH_PAIR_RE = re.compile(r"Code=(\d+),\s*Status=(\d+)")
+
+# ---------------------------------------------------------------------------
+# Janela de flakiness transitória do provedor (SP-T2 · #35 + #46)
+# ---------------------------------------------------------------------------
+# Casa qualquer `Status=5xx` no stderr do rclone — endpoint-agnóstico (auth
+# `/auth/v4` E block-upload `/storage/blocks`), unificando o classificador de
+# #35 (auth 8002/500-storm) e #46 (block 502/504) numa só janela.
+_5XX_RE = re.compile(r"Status=(5\d\d)\b")
+
+# Estado module-level: `_run` e `_classify_rclone_stderr` são funções
+# module-level (não métodos de RcloneEngine), então a janela vive aqui.
+# Timestamps monotônicos (alinhado ao dual-clock de ADR-004/007 — imune a
+# ajuste de wall-clock/suspend). `_run` é serializado sob `_rclone_lock`
+# (ADR-001), então append/leitura não precisam de lock adicional.
+_infra_window: deque[float] = deque()
+
+
+def _record_infra_signals(stderr: str) -> int:
+    """Registra na janela um timestamp monotônico por ocorrência `Status=5xx`.
+
+    Chamado por `_run` no caminho rc≠0. Retorna quantos 5xx foram registrados.
+    """
+    hits = _5XX_RE.findall(stderr)
+    now = time.monotonic()
+    for _ in hits:
+        _infra_window.append(now)
+    return len(hits)
+
+
+def _reset_infra_window() -> None:
+    """Zera a janela de 5xx — helper de teste (estado module-level)."""
+    _infra_window.clear()
+
+
+# Config da detecção de storm (setada por RcloneEngine.__init__ a partir de
+# RcloneConfig). Defaults calibrados dos 2 incidentes (2026-06-23 ~16× 500 numa
+# janela; 2026-08-26 storm ~1.5h) — conservador: exige storm real, não 5xx isolado.
+_DEFAULT_INFRA_STORM_THRESHOLD = 5
+_DEFAULT_INFRA_WINDOW_SECONDS = 600.0
+_INFRA_STORM_THRESHOLD = _DEFAULT_INFRA_STORM_THRESHOLD
+_INFRA_WINDOW_SECONDS = _DEFAULT_INFRA_WINDOW_SECONDS
+
+
+def _configure_infra_detection(threshold: int, window_seconds: float) -> None:
+    """Configura o detector de storm a partir de RcloneConfig (SP-T3)."""
+    global _INFRA_STORM_THRESHOLD, _INFRA_WINDOW_SECONDS
+    _INFRA_STORM_THRESHOLD = threshold
+    _INFRA_WINDOW_SECONDS = window_seconds
+
+
+def _infra_storm_active() -> bool:
+    """Poda a janela pelo window atual e diz se há um storm de 5xx ativo."""
+    cutoff = time.monotonic() - _INFRA_WINDOW_SECONDS
+    while _infra_window and _infra_window[0] < cutoff:
+        _infra_window.popleft()
+    return len(_infra_window) >= _INFRA_STORM_THRESHOLD
 
 # ADR-012: captura completa de stderr per call-site em ~/.local/state/drive-sync/
 # substituindo o tail-truncate `err.strip()[-N:]` que ocultava causa-raiz.
@@ -124,8 +182,14 @@ def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
         return None
     pair = _AUTH_PAIR_RE.search(match.group(0))
     code, status = int(pair.group(1)), int(pair.group(2))
+    kind = _AUTH_CODES[(code, status)]
+    # SP-T3: um par auth co-ocorrendo com um storm de 5xx do provedor é
+    # colateral da flakiness transitória — reclassifica para `proton_infra`
+    # (recovery=aguardar, sem reauth) em vez de credencial-genuína.
+    if _infra_storm_active():
+        kind = "proton_infra"
     return AuthDegradedError(
-        kind=_AUTH_CODES[(code, status)],
+        kind=kind,
         code=code,
         stderr_tail=stderr.strip()[-500:],
     )
@@ -176,6 +240,7 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
         rc = proc.returncode or 0
         stderr = stderr_b.decode("utf-8", errors="replace")
         if rc != 0:
+            _record_infra_signals(stderr)
             auth_err = _classify_rclone_stderr(stderr)
             if auth_err is not None:
                 raise auth_err
@@ -185,11 +250,15 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
 class RcloneEngine:
     def __init__(self, app: AppConfig):
         self.app = app
+        _configure_infra_detection(
+            app.rclone.infra_storm_threshold,
+            app.rclone.infra_window_seconds,
+        )
 
     def _base_cmd(self) -> list[str]:
         return [self.app.rclone.binary, *self.app.rclone.global_flags]
 
-    async def auth_probe(self) -> None:
+    async def auth_probe(self) -> bool:
         """Probe leve do backend para detectar falha de auth antes de um job real.
 
         Levanta AuthDegradedError quando o backend reporta auth quebrada.
@@ -202,11 +271,16 @@ class RcloneEngine:
         remote = f"{self.app.rclone.remote_name}:"
         cmd = self._base_cmd() + ["about", remote]
         try:
-            await _run(cmd)
+            rc, _out, _err = await _run(cmd)
+            # rc==0 é sucesso real; rc≠0 sem AuthDegradedError (ex.: 5xx do
+            # provedor) NÃO é sucesso — SP-T5 depende disso para não retomar
+            # prematuramente enquanto o provedor ainda está em storm.
+            return rc == 0
         except AuthDegradedError:
             raise
         except Exception as exc:  # noqa: BLE001
             log.debug("auth_probe falhou (não-auth): %s", exc)
+            return False
 
     # -----------------------------------------------------------------
     # Sincronização bidirecional de uma pasta "comum" (não-Git)
