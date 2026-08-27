@@ -383,6 +383,10 @@ class RcloneConfig:
     remote_root: str = "Sync"
     binary: str = "rclone"
     global_flags: list[str] = field(default_factory=list)
+    # Detecção de flakiness transitória do provedor (SP-T3 · #35 + #46):
+    # nº de erros 5xx numa janela deslizante para considerar um "storm" ativo.
+    infra_storm_threshold: int = 5
+    infra_window_seconds: float = 600.0
 
 
 @dataclass
@@ -565,6 +569,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         remote_root=rclone_raw.get("remote_root", "Sync").strip("/"),
         binary=rclone_raw.get("binary", "rclone"),
         global_flags=list(rclone_raw.get("global_flags", [])),
+        infra_storm_threshold=int(rclone_raw.get("infra_storm_threshold", 5)),
+        infra_window_seconds=float(rclone_raw.get("infra_window_seconds", 600.0)),
     )
 
     git_raw = raw.get("git", {}) or {}

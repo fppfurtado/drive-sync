@@ -92,6 +92,30 @@ def _reset_infra_window() -> None:
     """Zera a janela de 5xx — helper de teste (estado module-level)."""
     _infra_window.clear()
 
+
+# Config da detecção de storm (setada por RcloneEngine.__init__ a partir de
+# RcloneConfig). Defaults calibrados dos 2 incidentes (2026-06-23 ~16× 500 numa
+# janela; 2026-08-26 storm ~1.5h) — conservador: exige storm real, não 5xx isolado.
+_DEFAULT_INFRA_STORM_THRESHOLD = 5
+_DEFAULT_INFRA_WINDOW_SECONDS = 600.0
+_INFRA_STORM_THRESHOLD = _DEFAULT_INFRA_STORM_THRESHOLD
+_INFRA_WINDOW_SECONDS = _DEFAULT_INFRA_WINDOW_SECONDS
+
+
+def _configure_infra_detection(threshold: int, window_seconds: float) -> None:
+    """Configura o detector de storm a partir de RcloneConfig (SP-T3)."""
+    global _INFRA_STORM_THRESHOLD, _INFRA_WINDOW_SECONDS
+    _INFRA_STORM_THRESHOLD = threshold
+    _INFRA_WINDOW_SECONDS = window_seconds
+
+
+def _infra_storm_active() -> bool:
+    """Poda a janela pelo window atual e diz se há um storm de 5xx ativo."""
+    cutoff = time.monotonic() - _INFRA_WINDOW_SECONDS
+    while _infra_window and _infra_window[0] < cutoff:
+        _infra_window.popleft()
+    return len(_infra_window) >= _INFRA_STORM_THRESHOLD
+
 # ADR-012: captura completa de stderr per call-site em ~/.local/state/drive-sync/
 # substituindo o tail-truncate `err.strip()[-N:]` que ocultava causa-raiz.
 _FIRST_ERROR_RE = re.compile(r"^.*ERROR\s*:\s*(.+)$", re.MULTILINE)
@@ -158,8 +182,14 @@ def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
         return None
     pair = _AUTH_PAIR_RE.search(match.group(0))
     code, status = int(pair.group(1)), int(pair.group(2))
+    kind = _AUTH_CODES[(code, status)]
+    # SP-T3: um par auth co-ocorrendo com um storm de 5xx do provedor é
+    # colateral da flakiness transitória — reclassifica para `proton_infra`
+    # (recovery=aguardar, sem reauth) em vez de credencial-genuína.
+    if _infra_storm_active():
+        kind = "proton_infra"
     return AuthDegradedError(
-        kind=_AUTH_CODES[(code, status)],
+        kind=kind,
         code=code,
         stderr_tail=stderr.strip()[-500:],
     )
@@ -220,6 +250,10 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
 class RcloneEngine:
     def __init__(self, app: AppConfig):
         self.app = app
+        _configure_infra_detection(
+            app.rclone.infra_storm_threshold,
+            app.rclone.infra_window_seconds,
+        )
 
     def _base_cmd(self) -> list[str]:
         return [self.app.rclone.binary, *self.app.rclone.global_flags]
