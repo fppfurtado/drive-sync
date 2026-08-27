@@ -21,6 +21,9 @@ from drive_sync.sync_engine import (
     AuthDegradedError,
     RcloneEngine,
     _classify_rclone_stderr,
+    _infra_window,
+    _record_infra_signals,
+    _reset_infra_window,
     _run,
     _state_marker_for,
     remote_uri_for,
@@ -577,3 +580,34 @@ async def test_auth_probe_silences_non_auth_error():
 
     with patch("drive_sync.sync_engine._run", fake_run):
         await engine.auth_probe()  # não deve levantar
+
+
+# ---------------------------------------------------------------------------
+# SP-T2 — janela de flakiness transitória (_record_infra_signals) · #35 + #46
+# ---------------------------------------------------------------------------
+
+
+def test_record_infra_signals_registers_one_timestamp_per_5xx():
+    # EARS SP-T2: WHEN um _run retorna rc≠0 com N ocorrências Status=5xx no
+    # stderr, the system SHALL registrar N timestamps na janela.
+    _reset_infra_window()
+    stderr = (
+        "503 GET https://drive-api.proton.me/core/v4/users: 503 Service "
+        "Unavailable (Code=0, Status=503)\n"
+        "502 POST https://drive-api.proton.me/auth/v4/info: 502 Bad Gateway "
+        "(Code=0, Status=502)\n"
+        "500 GET https://zrh-storage.proton.me/storage/blocks: Internal server "
+        "error (Code=500, Status=500)"
+    )
+    n = _record_infra_signals(stderr)
+    assert n == 3
+    assert len(_infra_window) == 3
+
+
+def test_record_infra_signals_ignores_non_5xx():
+    # Par auth 8002/422 (não-5xx) não polui a janela.
+    _reset_infra_window()
+    stderr = "422 POST https://drive-api.proton.me/auth/v4 (Code=8002, Status=422)"
+    n = _record_infra_signals(stderr)
+    assert n == 0
+    assert len(_infra_window) == 0

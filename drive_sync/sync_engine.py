@@ -17,6 +17,8 @@ import hashlib
 import logging
 import os
 import re
+import time
+from collections import deque
 from pathlib import Path
 
 from .config import AppConfig, FolderConfig
@@ -57,6 +59,38 @@ _AUTH_ENDPOINT_RE = re.compile(r"(?:/api)?/auth/v4")
 
 # Re-extrai (code, status) do match já validado, para lookup do kind em _AUTH_CODES.
 _AUTH_PAIR_RE = re.compile(r"Code=(\d+),\s*Status=(\d+)")
+
+# ---------------------------------------------------------------------------
+# Janela de flakiness transitória do provedor (SP-T2 · #35 + #46)
+# ---------------------------------------------------------------------------
+# Casa qualquer `Status=5xx` no stderr do rclone — endpoint-agnóstico (auth
+# `/auth/v4` E block-upload `/storage/blocks`), unificando o classificador de
+# #35 (auth 8002/500-storm) e #46 (block 502/504) numa só janela.
+_5XX_RE = re.compile(r"Status=(5\d\d)\b")
+
+# Estado module-level: `_run` e `_classify_rclone_stderr` são funções
+# module-level (não métodos de RcloneEngine), então a janela vive aqui.
+# Timestamps monotônicos (alinhado ao dual-clock de ADR-004/007 — imune a
+# ajuste de wall-clock/suspend). `_run` é serializado sob `_rclone_lock`
+# (ADR-001), então append/leitura não precisam de lock adicional.
+_infra_window: deque[float] = deque()
+
+
+def _record_infra_signals(stderr: str) -> int:
+    """Registra na janela um timestamp monotônico por ocorrência `Status=5xx`.
+
+    Chamado por `_run` no caminho rc≠0. Retorna quantos 5xx foram registrados.
+    """
+    hits = _5XX_RE.findall(stderr)
+    now = time.monotonic()
+    for _ in hits:
+        _infra_window.append(now)
+    return len(hits)
+
+
+def _reset_infra_window() -> None:
+    """Zera a janela de 5xx — helper de teste (estado module-level)."""
+    _infra_window.clear()
 
 # ADR-012: captura completa de stderr per call-site em ~/.local/state/drive-sync/
 # substituindo o tail-truncate `err.strip()[-N:]` que ocultava causa-raiz.
@@ -176,6 +210,7 @@ async def _run(cmd: list[str]) -> tuple[int, str, str]:
         rc = proc.returncode or 0
         stderr = stderr_b.decode("utf-8", errors="replace")
         if rc != 0:
+            _record_infra_signals(stderr)
             auth_err = _classify_rclone_stderr(stderr)
             if auth_err is not None:
                 raise auth_err
