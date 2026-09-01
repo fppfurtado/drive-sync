@@ -155,6 +155,116 @@ def test_git_handling_agnostic_skip_folder_not_flagged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #77 (ADR-021) — Modelo A: roots declaradas (top-level sem sibling)
+# ---------------------------------------------------------------------------
+
+# Folders configurados vivem numa subárvore SEPARADA de `home` para que o pai deles
+# não seja ancestral de `home` — senão `home` viraria sibling escaneado pelo modelo B
+# (artefato de fixture; no mundo real o pai de `$HOME` é `/`, que ninguém configura).
+def _cfg_folder(tmp_path: Path, name: str = "x") -> FolderConfig:
+    return _folder(tmp_path / "cfg" / name, name=name)
+
+
+def test_model_a_root_flags_top_level_without_sibling(tmp_path):
+    """Uma root declarada é escaneada mesmo sem nenhum folder configurado sob ela —
+    o ponto-cego do modelo B (o caso `~/mneme` filho-direto de `$HOME`)."""
+    home = tmp_path / "home"
+    _with_file(home / "mneme")                  # órfão top-level, nenhum sibling config
+    # Sem roots: modelo B não vê `home` (não é pai de nenhum local_path) → nada.
+    assert audit_coverage_orphans([_cfg_folder(tmp_path)], allow=[]) == []
+    # Com root=home: `mneme` é flageado.
+    orphans = audit_coverage_orphans(
+        [_cfg_folder(tmp_path)], allow=[], roots=[home]
+    )
+    assert (home / "mneme").resolve() in orphans
+
+
+def test_model_a_root_covered_child_not_flagged(tmp_path):
+    """Sob uma root declarada, um filho que É um folder configurado não é órfão;
+    o sibling não-coberto é (o exato shape de `$HOME` com só `~/mneme` coberto)."""
+    home = tmp_path / "home"
+    _with_file(home / "mneme")                  # configurado (backup-eado)
+    _with_file(home / "Documents")              # órfão sob a root
+    orphans = audit_coverage_orphans(
+        [_folder(home / "mneme", name="mneme")], allow=[], roots=[home]
+    )
+    assert (home / "mneme").resolve() not in orphans
+    assert (home / "Documents").resolve() in orphans
+
+
+def test_model_a_union_with_model_b(tmp_path):
+    """Universo = pais-de-siblings (B) ∪ roots (A); um root que coincide com um pai
+    derivado não duplica nem quebra."""
+    home = tmp_path / "home"
+    _with_file(home / "mneme")                  # configurado
+    _with_file(home / "orphan_a")               # órfão via root A
+    pics = tmp_path / "pictures"
+    _with_file(pics / "screenshots")            # configurado (traz pics como pai — B)
+    _with_file(pics / "orphan_b")               # órfão via sibling B
+    folders = [
+        _folder(home / "mneme", name="mneme"),
+        _folder(pics / "screenshots", name="pics"),
+    ]
+    orphans = audit_coverage_orphans(folders, allow=[], roots=[home])
+    assert (home / "orphan_a").resolve() in orphans
+    assert (pics / "orphan_b").resolve() in orphans
+
+
+def test_model_a_nonexistent_root_skipped(tmp_path):
+    """Root declarada que não existe no FS é silenciosamente pulada (não levanta)."""
+    orphans = audit_coverage_orphans(
+        [_folder(tmp_path / "x")], allow=[], roots=[tmp_path / "nao-existe"]
+    )
+    assert orphans == []
+
+
+# ---------------------------------------------------------------------------
+# #77 (ADR-021) — allow GLOB (silencia o ruído de escanear $HOME)
+# ---------------------------------------------------------------------------
+
+def test_glob_allow_silences_matching_children(tmp_path):
+    """Um glob em `allow` silencia todos os filhos que casam (os dotdirs de $HOME)."""
+    home = tmp_path / "home"
+    _with_file(home / ".cache")
+    _with_file(home / ".config")
+    _with_file(home / "mneme")                  # real, NÃO deve ser silenciado
+    orphans = audit_coverage_orphans(
+        [_cfg_folder(tmp_path)],
+        allow=[home / ".*"],                    # glob: todos os dotdirs
+        roots=[home],
+    )
+    assert (home / ".cache").resolve() not in orphans
+    assert (home / ".config").resolve() not in orphans
+    assert (home / "mneme").resolve() in orphans
+
+
+def test_glob_allow_does_not_over_silence(tmp_path):
+    """Glob que não casa um filho não o silencia (o sinal real sobrevive)."""
+    home = tmp_path / "home"
+    _with_file(home / "Downloads")
+    orphans = audit_coverage_orphans(
+        [_cfg_folder(tmp_path)],
+        allow=[home / ".*"],                    # só casa dotdirs
+        roots=[home],
+    )
+    assert (home / "Downloads").resolve() in orphans
+
+
+def test_mixed_literal_and_glob_allow(tmp_path):
+    """`allow` mistura literal (exato/subpath) e glob no mesmo conjunto."""
+    home = tmp_path / "home"
+    _with_file(home / ".cache")                 # silenciado por glob
+    _with_file(home / "Downloads")              # silenciado por literal
+    _with_file(home / "mneme")                  # órfão real
+    orphans = audit_coverage_orphans(
+        [_cfg_folder(tmp_path)],
+        allow=[home / ".*", home / "Downloads"],
+        roots=[home],
+    )
+    assert orphans == [(home / "mneme").resolve()]
+
+
+# ---------------------------------------------------------------------------
 # Parsing da seção coverage_audit
 # ---------------------------------------------------------------------------
 
@@ -177,6 +287,7 @@ def test_coverage_audit_defaults(tmp_path):
     app = load_config(cfg)
     assert app.coverage_audit.enabled is True
     assert app.coverage_audit.allow == []
+    assert app.coverage_audit.roots == []
 
 
 def test_coverage_audit_parsed(tmp_path):
@@ -196,6 +307,28 @@ def test_coverage_audit_parsed(tmp_path):
     app = load_config(cfg)
     assert app.coverage_audit.enabled is False
     assert app.coverage_audit.allow == [(tmp_path / "sandbox")]
+
+
+def test_coverage_audit_roots_parsed(tmp_path):
+    """Seção coverage_audit.roots é lida e expandida (#77 / ADR-021)."""
+    (tmp_path / "d").mkdir()
+    (tmp_path / "root_a").mkdir()
+    cfg = _write_cfg(tmp_path, f"""
+        folders:
+          - name: d
+            local_path: {tmp_path / "d"}
+            remote_subpath: d
+            git_handling: plain
+        coverage_audit:
+          roots:
+            - {tmp_path / "root_a"}
+          allow:
+            - "~/.*"
+    """)
+    app = load_config(cfg)
+    assert app.coverage_audit.roots == [(tmp_path / "root_a")]
+    # glob preservado através do _expand (não vira exato): a magic char sobrevive.
+    assert any("*" in str(a) for a in app.coverage_audit.allow)
 
 
 # ---------------------------------------------------------------------------

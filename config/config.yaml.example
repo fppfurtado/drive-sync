@@ -206,11 +206,32 @@ dedupe:
 # local_path declarado conta como "conhecido", inclusive skip/bundle.
 coverage_audit:
   enabled: true
-  # Siblings deliberadamente NÃO sincronizados (casa exato ou subpath). Silencia o
-  # aviso para os intencionais sem cobri-los.
+  # roots (#77 / ADR-021, modelo A): diretórios escaneados INDEPENDENTE de haver um
+  # local_path configurado sob eles. Fecha o ponto-cego do modelo B (siblings): um
+  # top-level SEM sibling configurado — ex.: um filho-direto de `$HOME` como `~/mneme`
+  # — nunca entraria no universo derivado-de-siblings. Declarar `$HOME` aqui faz o
+  # PRÓXIMO gap desse tipo se auto-surfar, mesmo que nenhum folder sob a root mude.
+  # Vazio (default) = só modelo B. CUIDADO: escanear `$HOME` exige `allow` robusta
+  # (globs abaixo) — senão os dotdirs de env-stack afogam o sinal.
+  roots: []
+  #  - "~"                    # audita filhos-diretos de $HOME (requer allow-globs)
+  #  - "/storage"
+  #
+  # allow: paths intencionalmente-fora-de-cobertura. Duas formas:
+  #   - LITERAL: casa exato OU subpath (ex.: "/storage/tools" cobre tudo sob ele).
+  #   - GLOB (contém `*?[`, #77/ADR-021): casado por fnmatch contra o path do filho.
+  #     Necessário para tornar a root `$HOME` usável — silencia os dotdirs de
+  #     env-stack (chezmoi/dotfiles, não trabalho do drive-sync) sem enumerá-los um a
+  #     um. Converge com os `exclude:` do #55/ADR-020 (exclusão-por-exceção).
+  #     CAVEAT: um glob casa através de `/` (`~/.*` silencia também aninhados); e um
+  #     path LITERAL cujo dir tenha `*?[` no nome (raro) é lido como glob e pode não
+  #     casar — nesse caso use o path do dir-pai sem o metachar. Ver ADR-021.
   allow: []
-  #  - "~/dev/sandbox"
-  #  - "/storage/tools"
+  #  - "/storage/tools"       # literal — reproduzível, fora de quota
+  #  - "/storage/3. Resources"
+  #  - "~/.*"                 # glob — todos os dotdirs de $HOME
+  #  - "~/.local/share/*"     # glob — env-stack sob .local/share
+  #  - "~/Downloads"          # literal — não backup-eado por escolha
 
 # Probe periódico do backend para detectar falha de auth antes que um job real
 # falhe (Code=8002/9001 do protondrive). Em sessão saudável, gera 1 chamada
