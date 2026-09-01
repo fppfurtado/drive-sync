@@ -7,11 +7,11 @@ DETECÇÃO de órfãos; este frama uma INSTÂNCIA de alto valor + a disciplina d
 
 # Problem Brief: instância `~/mneme` (KB soberana) sem backup off-machine
 
-- Frozen at: — (withheld, draft)
+- Frozen at: 2026-09-01 (frozen after approval on 2026-09-01)
 - Mode: verifiable
 - Distilled from dossier: `.throughline/dossiers/mneme-instance-no-backup.md`
-- Brief version: — (withheld pending approval)
-- Status: DRAFT — freeze pending approval
+- Brief version: v1
+- Status: FROZEN
 - Parent frame: `briefs/coverage-audit-orfaos.md` (#56)
 - Amendments: none
 
@@ -82,7 +82,10 @@ versionamento é local: sem cópia off-machine, o disco é ponto único de falha
   bundle→restore num scratch reproduziu HEAD `f7f255b`, 648 commits, 199 arquivos versionados, `git
   fsck` limpo, `git bundle verify` rc=0. As únicas omissões foram 3 dirs **gitignored** (`derived/`
   = índice regenerável via `mneme index rebuild`; `.cursor/`, `.obsidian/` = artefatos de IDE "never in
-  the KB" por design) — corretamente fora do escopo. S1 satisfeito. basis: execução direta, 2026-09-01.
+  the KB" por design) — corretamente fora do escopo. S1 satisfeito. Confirmado também END-TO-END na cópia REAL do Proton: o daemon gerou e subiu
+  `proton:Sync/mneme/mneme.gitbundle`; download + `git bundle verify` ("complete history") + restore
+  reproduziram a KB, e o `git archive` da história compartilhada é byte-idêntico entre fonte e cópia
+  offsite (sha `2d03cb…`). basis: execução direta, 2026-09-01.
 
 ## Deliberate exclusions (from the dossier)
 - Candidato "git remote próprio (host de código externo)" — rejeitado por C1 (soberania + a remoção
