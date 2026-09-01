@@ -1,6 +1,7 @@
 """Carregamento e validação do arquivo de configuração."""
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 from dataclasses import dataclass, field
@@ -29,6 +30,23 @@ _AUTO_EXCLUDE_CODE_MARKERS = (".venv", "node_modules", "target")
 def _expand(p: str) -> Path:
     """Expande ~ e variáveis de ambiente, retornando Path absoluto."""
     return Path(os.path.expandvars(os.path.expanduser(p))).resolve()
+
+
+# #77 (ADR-021): uma entry de `coverage_audit.allow` que contém qualquer destes
+# caracteres é tratada como GLOB (casada por fnmatch contra o path do filho), não
+# como path literal (casa exato/subpath). Convergência com os globs de exclusão do
+# #55/ADR-020 — necessária para silenciar o ruído de escanear `$HOME` (dezenas de
+# dotdirs de env-stack que não são trabalho do drive-sync).
+# CAVEAT (ADR-021 §Consequências): um path LITERAL cujo nome de dir contém `*?[`
+# (raro — ex.: `~/Downloads/[torrents]`) é mal-classificado como glob e o fnmatch
+# não casa — a exclusão silenciosamente falha. E um glob amplo (`~/.*`) casa
+# através de `/` (fnmatch não trata `/` especial), silenciando também conteúdo
+# aninhado — na direção de exclusão é seguro-conservador, mas ciente disso.
+_GLOB_MAGIC_CHARS = ("*", "?", "[")
+
+
+def _is_glob(path: Path) -> bool:
+    return any(ch in str(path) for ch in _GLOB_MAGIC_CHARS)
 
 
 def _normalize_subpath(parent_name: str, raw_subpath: str, field_label: str) -> str:
@@ -244,14 +262,33 @@ def _dir_has_content(root: Path) -> bool:
 
 
 def audit_coverage_orphans(
-    folders: list["FolderConfig"], allow: list[Path]
+    folders: list["FolderConfig"],
+    allow: list[Path],
+    roots: list[Path] | None = None,
 ) -> list[Path]:
-    """#56 (ADR-015): órfãos de cobertura — subárvores irmãs sem folder cobrindo.
+    """#56 (ADR-015) + #77 (ADR-021): órfãos de cobertura — subárvores sem folder cobrindo.
 
-    Modelo B (siblings de configurados): o universo-a-checar são os diretórios-PAIS
-    dos `local_path` configurados. Para cada pai existente, cada filho-DIRETÓRIO com
-    conteúdo que não é ele próprio um path coberto (declarado, ou sob/contendo um
-    declarado) e não está allowlisted é um órfão de cobertura.
+    O universo-a-checar é a UNIÃO de dois modelos:
+
+    - **Modelo B (siblings de configurados, #56):** os diretórios-PAIS dos `local_path`
+      configurados. Cobre F1 (o órfão nasce sibling de um configurado).
+    - **Modelo A (roots declaradas, #77):** os diretórios em `roots`, escaneados
+      independentemente de haver ou não um `local_path` configurado sob eles. Fecha o
+      ponto-cego do modelo B: um top-level SEM sibling configurado (ex.: um filho-direto
+      de `$HOME` como `~/mneme`) nunca entraria no universo de B, mas entra se `$HOME`
+      for declarado como root. Desacopla o audit da presença INCIDENTAL de um folder
+      configurado sob a root (config churn não reabre o ponto-cego).
+
+    Para cada diretório do universo (existente), cada filho-DIRETÓRIO com conteúdo que
+    não é ele próprio um path coberto (declarado, ou sob/contendo um declarado) e não
+    está allowlisted é um órfão de cobertura.
+
+    `allow` aceita duas formas (#77): path LITERAL (casa exato ou subpath — como #56) e
+    GLOB (`*?[`, casado por fnmatch contra o path do filho). O glob é o que torna a root
+    `$HOME` usável — escaneá-la sem allowlist robusta cospe dezenas de dotdirs de
+    env-stack (`~/.cache`, `~/.local/share/*`…) que não são trabalho do drive-sync,
+    afogando o sinal. Padrões (`~/.*`, `~/.local/share/*`) convergem com os `exclude:`
+    do #55/ADR-020 (mesma governança de exclusão-por-exceção).
 
     `git_handling` é ORTOGONAL: todo `local_path` declarado conta como "conhecido pelo
     operador" independente do modo (auto/plain/bundle/skip). O audit sinaliza apenas
@@ -271,7 +308,12 @@ def audit_coverage_orphans(
     resolved = [f.local_path.resolve() for f in folders]
     covered = set(resolved)
     allow_resolved = [a.resolve() for a in allow]
+    allow_literal = [a for a in allow_resolved if not _is_glob(a)]
+    allow_glob = [str(a) for a in allow_resolved if _is_glob(a)]
+    # Universo = pais dos configurados (modelo B) ∪ roots declaradas (modelo A).
     parents = {p.parent for p in resolved}
+    if roots:
+        parents |= {r.resolve() for r in roots}
 
     orphans: set[Path] = set()
     for parent in parents:
@@ -293,8 +335,11 @@ def audit_coverage_orphans(
             # caso de igualdade exata.
             if any(c.is_relative_to(cov) or cov.is_relative_to(c) for cov in covered):
                 continue
-            # intencionalmente-fora (allowlist): casa exato ou é subpath de uma entry.
-            if any(c == a or c.is_relative_to(a) for a in allow_resolved):
+            # intencionalmente-fora (allowlist LITERAL): casa exato ou subpath.
+            if any(c == a or c.is_relative_to(a) for a in allow_literal):
+                continue
+            # intencionalmente-fora (allowlist GLOB): fnmatch contra o path do filho.
+            if any(fnmatch.fnmatch(str(c), pat) for pat in allow_glob):
                 continue
             if not _dir_has_content(c):
                 continue
@@ -429,14 +474,19 @@ class DedupeConfig:
 
 @dataclass
 class CoverageAuditConfig:
-    """#56 (ADR-015): audit de cobertura de órfãos, surfaceado em `--check` (warn).
+    """#56 (ADR-015) + #77 (ADR-021): audit de cobertura de órfãos, em `--check` (warn).
 
-    `allow`: paths (expandidos) tratados como intencionalmente-fora-de-cobertura —
-    siblings de folders configurados que o operador deliberadamente não sincroniza
-    (ex.: tools/, sandbox/, PARA morto). Um path é allowlisted se casa exato OU é
-    subpath de uma entry.
+    `roots` (#77, modelo A): diretórios escaneados INDEPENDENTE de haver um `local_path`
+    configurado sob eles — fecha o ponto-cego de top-level-sem-sibling (ex.: `$HOME`,
+    onde só `~/mneme` é backup-eado). Vazio (default) = só modelo B (siblings).
+
+    `allow`: paths (expandidos) tratados como intencionalmente-fora-de-cobertura. Duas
+    formas: LITERAL (casa exato OU subpath — ex.: `/storage/tools`) e GLOB (contém
+    `*?[`, casado por fnmatch — ex.: `~/.*`, `~/.local/share/*`). O glob é o que torna
+    `$HOME` como root usável (silencia os dotdirs de env-stack sem enumerá-los um a um).
     """
     enabled: bool = True
+    roots: list[Path] = field(default_factory=list)
     allow: list[Path] = field(default_factory=list)
 
 
@@ -666,6 +716,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     ca_raw = raw.get("coverage_audit", {}) or {}
     coverage_audit = CoverageAuditConfig(
         enabled=bool(ca_raw.get("enabled", True)),
+        roots=[_expand(r) for r in (ca_raw.get("roots") or [])],
         allow=[_expand(a) for a in (ca_raw.get("allow") or [])],
     )
 

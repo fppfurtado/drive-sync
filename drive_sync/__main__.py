@@ -79,7 +79,9 @@ def main(argv: list[str] | None = None) -> int:
         # cobertura (subárvores sem folder cobrindo) sem bloquear. Distinto dos
         # validadores fatais de load_config (auto_exclude/case_duplicates).
         if cfg.coverage_audit.enabled:
-            orphans = audit_coverage_orphans(cfg.folders, cfg.coverage_audit.allow)
+            orphans = audit_coverage_orphans(
+                cfg.folders, cfg.coverage_audit.allow, cfg.coverage_audit.roots
+            )
             if orphans:
                 bullets = "\n".join(f"  - {p}" for p in orphans)
                 print(
