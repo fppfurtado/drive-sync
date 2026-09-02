@@ -79,6 +79,12 @@ _AUTH_PAIR_RE = re.compile(r"Code=(\d+),\s*Status=(\d+)")
 # #35 (auth 8002/500-storm) e #46 (block 502/504) numa só janela.
 _5XX_RE = re.compile(r"Status=(5\d\d)\b")
 
+# Assinatura de upload-vazio (SP-T8 · #79 · F8): `400 Code=2003 "Upload file
+# empty"` — bloco cortado no meio por queda de conexão durante flakiness do
+# provedor. É um sinal de storm apesar de ser 400 (não-5xx, logo invisível ao
+# `_5XX_RE`) — entra no MESMO conjunto de evidência de storm.
+_EMPTY_UPLOAD_RE = re.compile(r"Code=2003,\s*Status=400")
+
 # Estado module-level: `_run` e `_classify_rclone_stderr` são funções
 # module-level (não métodos de RcloneEngine), então a janela vive aqui.
 # Timestamps monotônicos (alinhado ao dual-clock de ADR-004/007 — imune a
@@ -88,15 +94,17 @@ _infra_window: deque[float] = deque()
 
 
 def _record_infra_signals(stderr: str) -> int:
-    """Registra na janela um timestamp monotônico por ocorrência `Status=5xx`.
+    """Registra na janela um timestamp monotônico por sinal de storm do provedor.
 
-    Chamado por `_run` no caminho rc≠0. Retorna quantos 5xx foram registrados.
+    Chamado por `_run` no caminho rc≠0. Sinais de storm: cada `Status=5xx`
+    (endpoint-agnóstico) E cada `400 Code=2003` de upload-vazio (SP-T8/#79).
+    Retorna quantos sinais foram registrados.
     """
-    hits = _5XX_RE.findall(stderr)
+    n = len(_5XX_RE.findall(stderr)) + len(_EMPTY_UPLOAD_RE.findall(stderr))
     now = time.monotonic()
-    for _ in hits:
+    for _ in range(n):
         _infra_window.append(now)
-    return len(hits)
+    return n
 
 
 def _reset_infra_window() -> None:

@@ -756,6 +756,32 @@ def test_record_infra_signals_ignores_non_5xx():
     assert len(_infra_window) == 0
 
 
+def test_record_infra_signals_records_empty_upload_2003():
+    # EARS SP-T8 (#79/F8): WHEN um _run retorna rc≠0 cujo stderr contém
+    # `400 Code=2003 Upload file empty`, SHALL registrar um timestamp na janela
+    # (como faz para Status=5xx) — é um sinal de storm apesar de ser 400.
+    _reset_infra_window()
+    stderr = (
+        "400 POST https://zrh-storage.proton.me/storage/blocks: Upload file "
+        "empty (Code=2003, Status=400)"
+    )
+    n = _record_infra_signals(stderr)
+    assert n == 1
+    assert len(_infra_window) == 1
+
+
+def test_record_infra_signals_counts_5xx_and_2003_together():
+    # 5xx e 2003 co-ocorrendo no mesmo stderr somam.
+    _reset_infra_window()
+    stderr = (
+        "502 POST .../storage/blocks (Code=0, Status=502)\n"
+        "400 POST .../storage/blocks: Upload file empty (Code=2003, Status=400)"
+    )
+    n = _record_infra_signals(stderr)
+    assert n == 2
+    assert len(_infra_window) == 2
+
+
 # ---------------------------------------------------------------------------
 # SP-T3 — classificação context-aware (par auth × storm de 5xx) · #35 + #46
 # ---------------------------------------------------------------------------
