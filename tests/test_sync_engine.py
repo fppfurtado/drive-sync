@@ -830,6 +830,79 @@ def test_infra_window_prunes_expired_entries():
 
 
 # ---------------------------------------------------------------------------
+# SP-T9 — gatilho signature-gated (storm-colateral SEM par _AUTH_CODES) · #79
+# ---------------------------------------------------------------------------
+
+# Assinaturas de storm que NÃO casam _AUTH_CODES (o gap do F7):
+_STDERR_RAW_500_AUTH = (
+    "500 POST https://drive-api.proton.me/auth/v4/info: Internal server error "
+    "(Code=0, Status=500)"
+)
+_STDERR_502_BLOCK = (
+    "502 POST https://zrh-storage.proton.me/storage/blocks: 502 Bad Gateway "
+    "(Code=0, Status=502)"
+)
+_STDERR_2003_UPLOAD = (
+    "400 POST https://zrh-storage.proton.me/storage/blocks: Upload file empty "
+    "(Code=2003, Status=400)"
+)
+
+
+def _arm_storm(n: int = 3) -> None:
+    _configure_infra_detection(threshold=n, window_seconds=600.0)
+    for _ in range(n):
+        _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
+
+
+def test_classify_raw_500_auth_during_storm_is_proton_infra():
+    # EARS SP-T9: storm ativo + assinatura de storm (5xx cru em /auth/v4, SEM
+    # par _AUTH_CODES) → proton_infra. Antes do #79 isto era registrado na
+    # janela mas nunca disparava (F7).
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_RAW_500_AUTH)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+def test_classify_block_502_during_storm_is_proton_infra():
+    # EARS SP-T9 (fecha F5/#46): block 5xx endpoint-agnóstico dispara o back-off.
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_502_BLOCK)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+def test_classify_2003_during_storm_is_proton_infra():
+    # EARS SP-T9 + F8: a assinatura 2003 (também um sinal de storm) dispara.
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_2003_UPLOAD)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+def test_classify_storm_signature_without_active_storm_is_none():
+    # EARS SP-T9 (preserva S3): a MESMA assinatura SEM storm armado não pausa.
+    _reset_infra_window()  # janela vazia → sem storm
+    assert _classify_rclone_stderr(_STDERR_502_BLOCK) is None
+    assert _classify_rclone_stderr(_STDERR_RAW_500_AUTH) is None
+
+
+def test_classify_non_storm_error_during_storm_is_none():
+    # Segurança: um erro que NÃO carrega assinatura de storm não é mascarado
+    # como proton_infra só porque um storm está ativo.
+    _arm_storm()
+    assert _classify_rclone_stderr("rclone: directory not found") is None
+
+
+def test_classify_isolated_auth_code_no_storm_unchanged_by_sp_t9():
+    # Regressão: o caminho 1 (par auth isolado sem storm) segue invalid_credentials.
+    _reset_infra_window()
+    err = _classify_rclone_stderr(_STDERR_8002)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
+
+
+# ---------------------------------------------------------------------------
 # #61 / SP-T7 (J4) — força `--protondrive-2fa ""` em TODA chamada rclone.
 # Um `2fa` estático no rclone.conf é inútil no cold reauth e só produz o `8002`
 # enganoso; o flag explícito-vazio sobrescreve o config SEM escrever o arquivo

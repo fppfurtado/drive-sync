@@ -209,30 +209,64 @@ class StuckJobError(RuntimeError):
         super().__init__(f"job excedeu max_job_runtime_seconds={timeout_seconds:g}s")
 
 
-def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
-    """Detecta falha de auth conhecida do backend protondrive no stderr do rclone.
+def _has_storm_signature(stderr: str) -> bool:
+    """True se o próprio stderr carrega uma assinatura de storm-colateral (SP-T9).
 
-    Cobre 4 pares (Code, Status) — ver `_AUTH_CODES`. Endpoint aceito: `/auth/v4`
-    com ou sem prefixo `/api/`. Retorna None quando não casa.
+    Conjunto: qualquer `Status=5xx` (endpoint-agnóstico — `/auth/v4` cru sem par
+    `_AUTH_CODES` E `/storage/blocks`, fechando o F7/#46) OU o `400 Code=2003` de
+    upload-vazio (F8). É a condição — junto com um storm ativo — que dispara o
+    back-off `proton_infra` quando NÃO há par `_AUTH_CODES` no stderr.
     """
-    if _AUTH_ENDPOINT_RE.search(stderr) is None:
-        return None
-    match = _AUTH_CODE_RE.search(stderr)
-    if match is None:
-        return None
-    pair = _AUTH_PAIR_RE.search(match.group(0))
-    code, status = int(pair.group(1)), int(pair.group(2))
-    kind = _AUTH_CODES[(code, status)]
-    # SP-T3: um par auth co-ocorrendo com um storm de 5xx do provedor é
-    # colateral da flakiness transitória — reclassifica para `proton_infra`
-    # (recovery=aguardar, sem reauth) em vez de credencial-genuína.
-    if _infra_storm_active():
-        kind = "proton_infra"
-    return AuthDegradedError(
-        kind=kind,
-        code=code,
-        stderr_tail=stderr.strip()[-500:],
+    return (
+        _5XX_RE.search(stderr) is not None
+        or _EMPTY_UPLOAD_RE.search(stderr) is not None
     )
+
+
+def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
+    """Classifica o stderr do rclone em uma falha degradante conhecida, ou None.
+
+    Dois caminhos:
+    1. **Par de auth conhecido** (`_AUTH_CODES`, endpoint `/auth/v4` com/sem
+       `/api/`): reclassifica para `proton_infra` se co-ocorre com storm ativo
+       (SP-T3), senão o kind de credencial-genuína.
+    2. **Storm-colateral sem par auth** (SP-T9/#79): sob storm ativo, um erro
+       que carrega uma assinatura de storm (`_has_storm_signature` — 5xx cru de
+       qualquer endpoint OU `2003`) vira `proton_infra` MESMO sem par `_AUTH_CODES`
+       — fecha o gap "storm surge sem par auth" (F7: o gatilho v1 era
+       auth-endpoint-gated, então block-5xx/#46 e 500-cru eram registrados na
+       janela mas nunca disparavam).
+
+    Retorna None quando nada casa.
+    """
+    # Caminho 1 — par (code,status) conhecido em endpoint de auth.
+    if _AUTH_ENDPOINT_RE.search(stderr) is not None:
+        match = _AUTH_CODE_RE.search(stderr)
+        if match is not None:
+            pair = _AUTH_PAIR_RE.search(match.group(0))
+            code, status = int(pair.group(1)), int(pair.group(2))
+            kind = _AUTH_CODES[(code, status)]
+            # SP-T3: par auth co-ocorrendo com storm 5xx é colateral da
+            # flakiness transitória — reclassifica para `proton_infra`.
+            if _infra_storm_active():
+                kind = "proton_infra"
+            return AuthDegradedError(
+                kind=kind,
+                code=code,
+                stderr_tail=stderr.strip()[-500:],
+            )
+
+    # Caminho 2 (SP-T9) — storm ativo + assinatura de storm-colateral, sem par
+    # `_AUTH_CODES`. Recovery = aguardar (reusa toda a máquina `proton_infra`:
+    # pausa + auto-resume gated por probe + escalada — SP-T4/T5).
+    if _infra_storm_active() and _has_storm_signature(stderr):
+        return AuthDegradedError(
+            kind="proton_infra",
+            code=0,  # sem par auth — não há code significativo
+            stderr_tail=stderr.strip()[-500:],
+        )
+
+    return None
 
 
 # Assinatura stale-listings do bisync (SP-T2 · #47 · ADR-019): rc=7 cujo estado
