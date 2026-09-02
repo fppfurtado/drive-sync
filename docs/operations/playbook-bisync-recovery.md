@@ -205,4 +205,6 @@ O daemon detecta first-run por um marker próprio (`sync_engine.py:_state_marker
 ~/.cache/rclone/bisync/drive-sync.<sha1("<local>|<remote>")[:16]>.initialized
 ```
 
+> **NB — não confundir com `~/.cache/drive-sync/state/<folder>.success`:** esse é o marker de **staleness/watchdog** (ADR-005), NÃO o de first-run. Deletar o `.success` **não** dispara `--resync` (o daemon roda bisync normal e reincide no abort). Só o `.initialized` acima controla o resync.
+
 Quando o marker **não existe**, o próximo ciclo loga `Primeira sincronização — executando --resync.` e adiciona `--resync` ao comando **com os flags e excludes exatos e AO VIVO** — inclusive os excludes `git_handling`-aware calculados na classificação daquele ciclo (ADR-008). É por isso que deletar o marker é preferível a rodar `rclone bisync --resync` à mão: você não corre o risco de espelhar flags/excludes errados transcritos do journal. Ao concluir com sucesso, o daemon re-cria o marker (`marker.touch()`).
