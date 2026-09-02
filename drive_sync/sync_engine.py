@@ -85,6 +85,14 @@ _5XX_RE = re.compile(r"Status=(5\d\d)\b")
 # `_5XX_RE`) — entra no MESMO conjunto de evidência de storm.
 _EMPTY_UPLOAD_RE = re.compile(r"Code=2003,\s*Status=400")
 
+# Conjunto ÚNICO de assinaturas de storm-colateral (#79). Fonte-única consumida
+# tanto pela gravação na janela (`_record_infra_signals`, via findall) quanto
+# pelo gatilho (`_has_storm_signature`, via search) — para que a evidência
+# registrada e a condição de disparo NUNCA desincronizem ao adicionar um sinal
+# novo (basta estender esta tupla). Padrões disjuntos (5xx ≠ 400/2003) → sem
+# dupla-contagem.
+_STORM_SIGNAL_RES = (_5XX_RE, _EMPTY_UPLOAD_RE)
+
 # Estado module-level: `_run` e `_classify_rclone_stderr` são funções
 # module-level (não métodos de RcloneEngine), então a janela vive aqui.
 # Timestamps monotônicos (alinhado ao dual-clock de ADR-004/007 — imune a
@@ -100,7 +108,7 @@ def _record_infra_signals(stderr: str) -> int:
     (endpoint-agnóstico) E cada `400 Code=2003` de upload-vazio (SP-T8/#79).
     Retorna quantos sinais foram registrados.
     """
-    n = len(_5XX_RE.findall(stderr)) + len(_EMPTY_UPLOAD_RE.findall(stderr))
+    n = sum(len(rx.findall(stderr)) for rx in _STORM_SIGNAL_RES)
     now = time.monotonic()
     for _ in range(n):
         _infra_window.append(now)
@@ -217,10 +225,7 @@ def _has_storm_signature(stderr: str) -> bool:
     upload-vazio (F8). É a condição — junto com um storm ativo — que dispara o
     back-off `proton_infra` quando NÃO há par `_AUTH_CODES` no stderr.
     """
-    return (
-        _5XX_RE.search(stderr) is not None
-        or _EMPTY_UPLOAD_RE.search(stderr) is not None
-    )
+    return any(rx.search(stderr) is not None for rx in _STORM_SIGNAL_RES)
 
 
 def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:

@@ -932,6 +932,57 @@ def test_classify_storm_without_divergence_still_proton_infra():
     assert err.kind == "proton_infra"
 
 
+# Integração S6 (SP-T10): a deferência do classificador PRECISA propagar por
+# `_run` sem levantar — só assim o branch rc≠0 do `bisync_folder` roda e o advice
+# [BISYNC_SAFETY_ABORT] alcança o operador. O teste unitário acima prova o retorno
+# do classificador; este prova o ponto de integração de segurança (o raise interno
+# de `_run` NÃO dispara para a divergência-genuína sob storm).
+async def test_run_does_not_raise_on_too_many_deletes_during_storm(monkeypatch):
+    _arm_storm()
+    stderr = (
+        "502 POST https://zrh-storage.proton.me/storage/blocks (Code=0, Status=502)\n"
+        "ERROR: Safety abort: too many deletes (>50%) - Run with --force if desired"
+    )
+
+    class _FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", stderr.encode("utf-8"))
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    # NÃO levanta (deferência S6 propaga) → rc=1 volta ao caller (bisync_folder),
+    # que então roda o branch rc≠0 e o advice too-many-deletes.
+    rc, _out, err = await _run(["rclone", "bisync", "a", "proton:b"])
+    assert rc == 1
+    assert "too many deletes" in err
+
+
+async def test_run_raises_proton_infra_on_storm_signature_without_divergence(monkeypatch):
+    # Contraprova de integração: um 5xx de storm SEM divergência-genuína SIM
+    # levanta proton_infra por `_run` (o back-off do SP-T9 de fato dispara).
+    _arm_storm()
+
+    class _FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", _STDERR_502_BLOCK.encode("utf-8"))
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(AuthDegradedError) as excinfo:
+        await _run(["rclone", "bisync", "a", "proton:b"])
+    assert excinfo.value.kind == "proton_infra"
+
+
 # ---------------------------------------------------------------------------
 # #61 / SP-T7 (J4) — força `--protondrive-2fa ""` em TODA chamada rclone.
 # Um `2fa` estático no rclone.conf é inútil no cold reauth e só produz o `8002`
