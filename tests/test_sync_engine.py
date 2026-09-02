@@ -756,6 +756,32 @@ def test_record_infra_signals_ignores_non_5xx():
     assert len(_infra_window) == 0
 
 
+def test_record_infra_signals_records_empty_upload_2003():
+    # EARS SP-T8 (#79/F8): WHEN um _run retorna rc≠0 cujo stderr contém
+    # `400 Code=2003 Upload file empty`, SHALL registrar um timestamp na janela
+    # (como faz para Status=5xx) — é um sinal de storm apesar de ser 400.
+    _reset_infra_window()
+    stderr = (
+        "400 POST https://zrh-storage.proton.me/storage/blocks: Upload file "
+        "empty (Code=2003, Status=400)"
+    )
+    n = _record_infra_signals(stderr)
+    assert n == 1
+    assert len(_infra_window) == 1
+
+
+def test_record_infra_signals_counts_5xx_and_2003_together():
+    # 5xx e 2003 co-ocorrendo no mesmo stderr somam.
+    _reset_infra_window()
+    stderr = (
+        "502 POST .../storage/blocks (Code=0, Status=502)\n"
+        "400 POST .../storage/blocks: Upload file empty (Code=2003, Status=400)"
+    )
+    n = _record_infra_signals(stderr)
+    assert n == 2
+    assert len(_infra_window) == 2
+
+
 # ---------------------------------------------------------------------------
 # SP-T3 — classificação context-aware (par auth × storm de 5xx) · #35 + #46
 # ---------------------------------------------------------------------------
@@ -801,6 +827,160 @@ def test_infra_window_prunes_expired_entries():
     assert _infra_storm_active() is False  # podada → 0 >= 1 é False
     _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
     assert _infra_storm_active() is True  # entrada fresca conta → 1 >= 1
+
+
+# ---------------------------------------------------------------------------
+# SP-T9 — gatilho signature-gated (storm-colateral SEM par _AUTH_CODES) · #79
+# ---------------------------------------------------------------------------
+
+# Assinaturas de storm que NÃO casam _AUTH_CODES (o gap do F7):
+_STDERR_RAW_500_AUTH = (
+    "500 POST https://drive-api.proton.me/auth/v4/info: Internal server error "
+    "(Code=0, Status=500)"
+)
+_STDERR_502_BLOCK = (
+    "502 POST https://zrh-storage.proton.me/storage/blocks: 502 Bad Gateway "
+    "(Code=0, Status=502)"
+)
+_STDERR_2003_UPLOAD = (
+    "400 POST https://zrh-storage.proton.me/storage/blocks: Upload file empty "
+    "(Code=2003, Status=400)"
+)
+
+
+def _arm_storm(n: int = 3) -> None:
+    _configure_infra_detection(threshold=n, window_seconds=600.0)
+    for _ in range(n):
+        _record_infra_signals("… 503 Service Unavailable (Code=0, Status=503)")
+
+
+def test_classify_raw_500_auth_during_storm_is_proton_infra():
+    # EARS SP-T9: storm ativo + assinatura de storm (5xx cru em /auth/v4, SEM
+    # par _AUTH_CODES) → proton_infra. Antes do #79 isto era registrado na
+    # janela mas nunca disparava (F7).
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_RAW_500_AUTH)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+def test_classify_block_502_during_storm_is_proton_infra():
+    # EARS SP-T9 (fecha F5/#46): block 5xx endpoint-agnóstico dispara o back-off.
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_502_BLOCK)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+def test_classify_2003_during_storm_is_proton_infra():
+    # EARS SP-T9 + F8: a assinatura 2003 (também um sinal de storm) dispara.
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_2003_UPLOAD)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+def test_classify_storm_signature_without_active_storm_is_none():
+    # EARS SP-T9 (preserva S3): a MESMA assinatura SEM storm armado não pausa.
+    _reset_infra_window()  # janela vazia → sem storm
+    assert _classify_rclone_stderr(_STDERR_502_BLOCK) is None
+    assert _classify_rclone_stderr(_STDERR_RAW_500_AUTH) is None
+
+
+def test_classify_non_storm_error_during_storm_is_none():
+    # Segurança: um erro que NÃO carrega assinatura de storm não é mascarado
+    # como proton_infra só porque um storm está ativo.
+    _arm_storm()
+    assert _classify_rclone_stderr("rclone: directory not found") is None
+
+
+def test_classify_isolated_auth_code_no_storm_unchanged_by_sp_t9():
+    # Regressão: o caminho 1 (par auth isolado sem storm) segue invalid_credentials.
+    _reset_infra_window()
+    err = _classify_rclone_stderr(_STDERR_8002)
+    assert err is not None
+    assert err.kind == "invalid_credentials"
+
+
+# ---------------------------------------------------------------------------
+# SP-T10 — precedência de divergência-genuína (trava de segurança S6) · #79
+# ---------------------------------------------------------------------------
+
+
+def test_classify_too_many_deletes_during_storm_defers_not_proton_infra():
+    # EARS SP-T10 (S6): IF o stderr casa `too many deletes` (rc=1) E storm ativo
+    # E há Status=5xx no mesmo stderr, THEN retornar None (NÃO proton_infra) —
+    # deixando o abort alcançar o handler [BISYNC_SAFETY_ABORT] do bisync_folder.
+    # Sem esta trava, o raise de proton_infra em _run pularia o branch rc≠0 e o
+    # advice de perda-de-dados seria suprimido.
+    _arm_storm()
+    stderr = (
+        "502 POST https://zrh-storage.proton.me/storage/blocks (Code=0, Status=502)\n"
+        "ERROR: Safety abort: too many deletes (>50%) - Run with --force if desired"
+    )
+    assert _is_too_many_deletes(stderr) is True  # pré-condição do teste
+    assert _infra_storm_active() is True
+    assert _classify_rclone_stderr(stderr) is None
+
+
+def test_classify_storm_without_divergence_still_proton_infra():
+    # Contraprova: mesma janela armada, um 5xx SEM assinatura de divergência
+    # segue virando proton_infra (a trava S6 é específica, não desliga o SP-T9).
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_502_BLOCK)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+# Integração S6 (SP-T10): a deferência do classificador PRECISA propagar por
+# `_run` sem levantar — só assim o branch rc≠0 do `bisync_folder` roda e o advice
+# [BISYNC_SAFETY_ABORT] alcança o operador. O teste unitário acima prova o retorno
+# do classificador; este prova o ponto de integração de segurança (o raise interno
+# de `_run` NÃO dispara para a divergência-genuína sob storm).
+async def test_run_does_not_raise_on_too_many_deletes_during_storm(monkeypatch):
+    _arm_storm()
+    stderr = (
+        "502 POST https://zrh-storage.proton.me/storage/blocks (Code=0, Status=502)\n"
+        "ERROR: Safety abort: too many deletes (>50%) - Run with --force if desired"
+    )
+
+    class _FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", stderr.encode("utf-8"))
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    # NÃO levanta (deferência S6 propaga) → rc=1 volta ao caller (bisync_folder),
+    # que então roda o branch rc≠0 e o advice too-many-deletes.
+    rc, _out, err = await _run(["rclone", "bisync", "a", "proton:b"])
+    assert rc == 1
+    assert "too many deletes" in err
+
+
+async def test_run_raises_proton_infra_on_storm_signature_without_divergence(monkeypatch):
+    # Contraprova de integração: um 5xx de storm SEM divergência-genuína SIM
+    # levanta proton_infra por `_run` (o back-off do SP-T9 de fato dispara).
+    _arm_storm()
+
+    class _FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", _STDERR_502_BLOCK.encode("utf-8"))
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(AuthDegradedError) as excinfo:
+        await _run(["rclone", "bisync", "a", "proton:b"])
+    assert excinfo.value.kind == "proton_infra"
 
 
 # ---------------------------------------------------------------------------

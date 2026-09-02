@@ -79,6 +79,20 @@ _AUTH_PAIR_RE = re.compile(r"Code=(\d+),\s*Status=(\d+)")
 # #35 (auth 8002/500-storm) e #46 (block 502/504) numa só janela.
 _5XX_RE = re.compile(r"Status=(5\d\d)\b")
 
+# Assinatura de upload-vazio (SP-T8 · #79 · F8): `400 Code=2003 "Upload file
+# empty"` — bloco cortado no meio por queda de conexão durante flakiness do
+# provedor. É um sinal de storm apesar de ser 400 (não-5xx, logo invisível ao
+# `_5XX_RE`) — entra no MESMO conjunto de evidência de storm.
+_EMPTY_UPLOAD_RE = re.compile(r"Code=2003,\s*Status=400")
+
+# Conjunto ÚNICO de assinaturas de storm-colateral (#79). Fonte-única consumida
+# tanto pela gravação na janela (`_record_infra_signals`, via findall) quanto
+# pelo gatilho (`_has_storm_signature`, via search) — para que a evidência
+# registrada e a condição de disparo NUNCA desincronizem ao adicionar um sinal
+# novo (basta estender esta tupla). Padrões disjuntos (5xx ≠ 400/2003) → sem
+# dupla-contagem.
+_STORM_SIGNAL_RES = (_5XX_RE, _EMPTY_UPLOAD_RE)
+
 # Estado module-level: `_run` e `_classify_rclone_stderr` são funções
 # module-level (não métodos de RcloneEngine), então a janela vive aqui.
 # Timestamps monotônicos (alinhado ao dual-clock de ADR-004/007 — imune a
@@ -88,15 +102,17 @@ _infra_window: deque[float] = deque()
 
 
 def _record_infra_signals(stderr: str) -> int:
-    """Registra na janela um timestamp monotônico por ocorrência `Status=5xx`.
+    """Registra na janela um timestamp monotônico por sinal de storm do provedor.
 
-    Chamado por `_run` no caminho rc≠0. Retorna quantos 5xx foram registrados.
+    Chamado por `_run` no caminho rc≠0. Sinais de storm: cada `Status=5xx`
+    (endpoint-agnóstico) E cada `400 Code=2003` de upload-vazio (SP-T8/#79).
+    Retorna quantos sinais foram registrados.
     """
-    hits = _5XX_RE.findall(stderr)
+    n = sum(len(rx.findall(stderr)) for rx in _STORM_SIGNAL_RES)
     now = time.monotonic()
-    for _ in hits:
+    for _ in range(n):
         _infra_window.append(now)
-    return len(hits)
+    return n
 
 
 def _reset_infra_window() -> None:
@@ -201,30 +217,71 @@ class StuckJobError(RuntimeError):
         super().__init__(f"job excedeu max_job_runtime_seconds={timeout_seconds:g}s")
 
 
-def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
-    """Detecta falha de auth conhecida do backend protondrive no stderr do rclone.
+def _has_storm_signature(stderr: str) -> bool:
+    """True se o próprio stderr carrega uma assinatura de storm-colateral (SP-T9).
 
-    Cobre 4 pares (Code, Status) — ver `_AUTH_CODES`. Endpoint aceito: `/auth/v4`
-    com ou sem prefixo `/api/`. Retorna None quando não casa.
+    Conjunto: qualquer `Status=5xx` (endpoint-agnóstico — `/auth/v4` cru sem par
+    `_AUTH_CODES` E `/storage/blocks`, fechando o F7/#46) OU o `400 Code=2003` de
+    upload-vazio (F8). É a condição — junto com um storm ativo — que dispara o
+    back-off `proton_infra` quando NÃO há par `_AUTH_CODES` no stderr.
     """
-    if _AUTH_ENDPOINT_RE.search(stderr) is None:
-        return None
-    match = _AUTH_CODE_RE.search(stderr)
-    if match is None:
-        return None
-    pair = _AUTH_PAIR_RE.search(match.group(0))
-    code, status = int(pair.group(1)), int(pair.group(2))
-    kind = _AUTH_CODES[(code, status)]
-    # SP-T3: um par auth co-ocorrendo com um storm de 5xx do provedor é
-    # colateral da flakiness transitória — reclassifica para `proton_infra`
-    # (recovery=aguardar, sem reauth) em vez de credencial-genuína.
-    if _infra_storm_active():
-        kind = "proton_infra"
-    return AuthDegradedError(
-        kind=kind,
-        code=code,
-        stderr_tail=stderr.strip()[-500:],
-    )
+    return any(rx.search(stderr) is not None for rx in _STORM_SIGNAL_RES)
+
+
+def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
+    """Classifica o stderr do rclone em uma falha degradante conhecida, ou None.
+
+    Dois caminhos:
+    1. **Par de auth conhecido** (`_AUTH_CODES`, endpoint `/auth/v4` com/sem
+       `/api/`): reclassifica para `proton_infra` se co-ocorre com storm ativo
+       (SP-T3), senão o kind de credencial-genuína.
+    2. **Storm-colateral sem par auth** (SP-T9/#79): sob storm ativo, um erro
+       que carrega uma assinatura de storm (`_has_storm_signature` — 5xx cru de
+       qualquer endpoint OU `2003`) vira `proton_infra` MESMO sem par `_AUTH_CODES`
+       — fecha o gap "storm surge sem par auth" (F7: o gatilho v1 era
+       auth-endpoint-gated, então block-5xx/#46 e 500-cru eram registrados na
+       janela mas nunca disparavam).
+
+    Retorna None quando nada casa.
+    """
+    # Caminho 1 — par (code,status) conhecido em endpoint de auth.
+    if _AUTH_ENDPOINT_RE.search(stderr) is not None:
+        match = _AUTH_CODE_RE.search(stderr)
+        if match is not None:
+            pair = _AUTH_PAIR_RE.search(match.group(0))
+            code, status = int(pair.group(1)), int(pair.group(2))
+            kind = _AUTH_CODES[(code, status)]
+            # SP-T3: par auth co-ocorrendo com storm 5xx é colateral da
+            # flakiness transitória — reclassifica para `proton_infra`.
+            if _infra_storm_active():
+                kind = "proton_infra"
+            return AuthDegradedError(
+                kind=kind,
+                code=code,
+                stderr_tail=stderr.strip()[-500:],
+            )
+
+    # Caminho 2 (SP-T9) — storm ativo + assinatura de storm-colateral, sem par
+    # `_AUTH_CODES`. Recovery = aguardar (reusa toda a máquina `proton_infra`:
+    # pausa + auto-resume gated por probe + escalada — SP-T4/T5).
+    if _infra_storm_active() and _has_storm_signature(stderr):
+        # SP-T10 (S6) — precedência de divergência-genuína. Um safety-abort
+        # `too many deletes` (rc=1, #52) coincidente com um 5xx do storm NÃO
+        # pode ser mascarado como transitório: co-ocorrência ≠ causação, e
+        # mascará-lo suprimiria o advice `[BISYNC_SAFETY_ABORT]` do `bisync_folder`.
+        # A deferência PRECISA ser aqui: `_run` levanta a exceção internamente,
+        # então retornar `proton_infra` pularia o branch rc≠0 do `bisync_folder`.
+        # (case-duplicates rc=7 não tem discriminador runtime — deferido ao #38,
+        # ver Deliberate exclusions do Spec v2.)
+        if _is_too_many_deletes(stderr):
+            return None
+        return AuthDegradedError(
+            kind="proton_infra",
+            code=0,  # sem par auth — não há code significativo
+            stderr_tail=stderr.strip()[-500:],
+        )
+
+    return None
 
 
 # Assinatura stale-listings do bisync (SP-T2 · #47 · ADR-019): rc=7 cujo estado

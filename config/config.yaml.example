@@ -13,11 +13,13 @@ rclone:
     - "--retries=3"
     - "--low-level-retries=10"
     - "--track-renames"
-  # Detecção de flakiness transitória do provedor (ADR-016 · #35/#46): um erro de
-  # auth colateral de um storm de 5xx é reclassificado para `proton_infra`
-  # (recovery = aguardar, sem reauth) em vez de credencial-genuína, com
-  # auto-resume gated por probe. Defaults calibrados de 2 incidentes.
-  infra_storm_threshold: 5          # nº de 5xx numa janela para considerar storm (>= 1)
+  # Detecção de flakiness transitória do provedor (ADR-016 · #35/#46/#79): sob um
+  # storm ativo, um erro que carrega uma assinatura de storm-colateral — `Status=5xx`
+  # (auth OU block/storage) ou `400 Code=2003` de upload-vazio — é reclassificado
+  # para `proton_infra` (recovery = aguardar, sem reauth), com ou sem par de auth
+  # (#79). Auto-resume gated por probe. Divergência-genuína de bisync (rc=1
+  # too-many-deletes) coincidente com storm NÃO é mascarada. Defaults de 2 incidentes.
+  infra_storm_threshold: 5          # nº de sinais de storm numa janela para disparar (>= 1)
   infra_window_seconds: 600         # janela deslizante do detector, em segundos (> 0)
 
   # #45 — kill switch por job rclone. Um job que ultrapassa este limite é morto
