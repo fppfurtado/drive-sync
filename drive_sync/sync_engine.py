@@ -260,6 +260,16 @@ def _classify_rclone_stderr(stderr: str) -> AuthDegradedError | None:
     # `_AUTH_CODES`. Recovery = aguardar (reusa toda a máquina `proton_infra`:
     # pausa + auto-resume gated por probe + escalada — SP-T4/T5).
     if _infra_storm_active() and _has_storm_signature(stderr):
+        # SP-T10 (S6) — precedência de divergência-genuína. Um safety-abort
+        # `too many deletes` (rc=1, #52) coincidente com um 5xx do storm NÃO
+        # pode ser mascarado como transitório: co-ocorrência ≠ causação, e
+        # mascará-lo suprimiria o advice `[BISYNC_SAFETY_ABORT]` do `bisync_folder`.
+        # A deferência PRECISA ser aqui: `_run` levanta a exceção internamente,
+        # então retornar `proton_infra` pularia o branch rc≠0 do `bisync_folder`.
+        # (case-duplicates rc=7 não tem discriminador runtime — deferido ao #38,
+        # ver Deliberate exclusions do Spec v2.)
+        if _is_too_many_deletes(stderr):
+            return None
         return AuthDegradedError(
             kind="proton_infra",
             code=0,  # sem par auth — não há code significativo

@@ -903,6 +903,36 @@ def test_classify_isolated_auth_code_no_storm_unchanged_by_sp_t9():
 
 
 # ---------------------------------------------------------------------------
+# SP-T10 — precedência de divergência-genuína (trava de segurança S6) · #79
+# ---------------------------------------------------------------------------
+
+
+def test_classify_too_many_deletes_during_storm_defers_not_proton_infra():
+    # EARS SP-T10 (S6): IF o stderr casa `too many deletes` (rc=1) E storm ativo
+    # E há Status=5xx no mesmo stderr, THEN retornar None (NÃO proton_infra) —
+    # deixando o abort alcançar o handler [BISYNC_SAFETY_ABORT] do bisync_folder.
+    # Sem esta trava, o raise de proton_infra em _run pularia o branch rc≠0 e o
+    # advice de perda-de-dados seria suprimido.
+    _arm_storm()
+    stderr = (
+        "502 POST https://zrh-storage.proton.me/storage/blocks (Code=0, Status=502)\n"
+        "ERROR: Safety abort: too many deletes (>50%) - Run with --force if desired"
+    )
+    assert _is_too_many_deletes(stderr) is True  # pré-condição do teste
+    assert _infra_storm_active() is True
+    assert _classify_rclone_stderr(stderr) is None
+
+
+def test_classify_storm_without_divergence_still_proton_infra():
+    # Contraprova: mesma janela armada, um 5xx SEM assinatura de divergência
+    # segue virando proton_infra (a trava S6 é específica, não desliga o SP-T9).
+    _arm_storm()
+    err = _classify_rclone_stderr(_STDERR_502_BLOCK)
+    assert err is not None
+    assert err.kind == "proton_infra"
+
+
+# ---------------------------------------------------------------------------
 # #61 / SP-T7 (J4) — força `--protondrive-2fa ""` em TODA chamada rclone.
 # Um `2fa` estático no rclone.conf é inútil no cold reauth e só produz o `8002`
 # enganoso; o flag explícito-vazio sobrescreve o config SEM escrever o arquivo
