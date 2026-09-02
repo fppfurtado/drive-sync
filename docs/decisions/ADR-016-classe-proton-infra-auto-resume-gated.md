@@ -66,3 +66,39 @@ confinada à classe `proton_infra`, que por construção só existe quando há s
   concluiu que limpá-lo é seguro mas introduz corrida de escrita no `rclone.conf`; deferido a
   mini-ciclo próprio (ver `docs/spikes/SP-T1-2fa-cold-reauth.md`). A família rc=7/rc=1 (estado bisync)
   segue coberta por `briefs/recovery-safety-abort-bisync.md`, mecanismo distinto.
+
+## Emenda 2026-09-02 (#79) — gatilho signature-gated + precedência de divergência-genuína
+
+**Status:** Aceito. **Origem:** #79 (Brief v2 J5/S5/S6/F7/F8, Spec v2 SP-T8..SP-T11). Instâncias vivas:
+2026-09-01 e 2026-09-02/#80 — storms 5xx do provedor que **não** casavam `_AUTH_CODES` (500 cru em
+`/auth/v4/info`, `502 /storage/blocks`, `400 Code=2003 "Upload file empty"`) faziam o rclone re-logar a
+cada chamada → flood de "new login" + rate-limit aprofundado.
+
+**O que muda:**
+
+1. **Gatilho ampliado de par-`_AUTH_CODES` → conjunto de assinaturas de storm (fecha F7/#46).** A
+   decisão original disparava `proton_infra` só quando um **par `_AUTH_CODES`** co-ocorria com um storm
+   (`_classify_rclone_stderr` era **auth-endpoint-gated** por `_AUTH_ENDPOINT_RE`). A janela de storm já
+   era endpoint-agnóstica, mas o **gatilho não** — então `502 /storage/blocks` (#46) e `500` cru de auth
+   eram registrados na janela e nunca agiam. Agora, sob storm ativo, um erro que carrega uma **assinatura
+   de storm-colateral** (`_has_storm_signature`: qualquer `Status=5xx` endpoint-agnóstico OU
+   `400 Code=2003`) vira `proton_infra` **mesmo sem par `_AUTH_CODES`**. Reusa integralmente a máquina de
+   pausa + auto-resume gated por probe + escalada (nada novo no caminho de recuperação — C2).
+
+2. **`400 Code=2003` entra no conjunto de evidência de storm** gravado por `_record_infra_signals`
+   (SP-T8/F8) — bloco de upload cortado mid-stream por queda de conexão, um sintoma de storm apesar de
+   ser 400.
+
+3. **Precedência de divergência-genuína (S6, trava de segurança).** Uma assinatura de **divergência real**
+   de bisync coincidente com um storm **NÃO** é mascarada como transitória: `_classify_rclone_stderr`
+   **defere** (retorna `None`) quando o stderr casa `_is_too_many_deletes` (rc=1, #52), deixando o abort
+   alcançar o handler `[BISYNC_SAFETY_ABORT]` do `bisync_folder`. Co-ocorrência de 5xx ≠ causação; mascarar
+   suprimiria o advice de perda-de-dados. A deferência vive no classificador por necessidade (`_run`
+   levanta a exceção internamente — retornar `proton_infra` pularia o branch rc≠0). **Limite:** rc=7
+   case-duplicates (ADR-011) não tem discriminador runtime (é config-time; o classificador rc=7 runtime é o
+   **#38** aberto) — o braço case-dup do S6 fica deferido ao #38; residual (case-dup + 5xx coincidente sob
+   storm → mascaramento temporário, reaparece pós-storm, sem perda de dado) aceito.
+
+**Preservado:** a mesma assinatura **sem** storm armado não pausa (S3); par `_AUTH_CODES` isolado-sem-storm
+mantém o kind de credencial-genuína; o probe/escalada do resume (auth-shaped) é inalterado — a exclusão de
+divergência-genuína é **por construção** (o classificador defere), não depende do probe para desmascarar.
