@@ -306,6 +306,25 @@ def _is_stale_listings(stderr: str) -> bool:
     return _STALE_LISTINGS_RE.search(stderr) is not None
 
 
+# Desfechos de `_attempt_gated_autoresync` (ADR-019 emenda #86). Distinguem, para o
+# caller, POR QUE a auto-recuperação não recuperou — o que decide se o guard de
+# 1-tentativa (D4) é liberado ou mantido latcheado:
+#   RECOVERED     — `--resync` real reconstruiu o baseline (rc==0) → sucesso.
+#   DIVERGENT     — dry-run provou divergência (transfer/delete) → mantém o latch
+#                   (anti-thrash D4: não re-roda o dry-run a cada ciclo num folder
+#                   genuinamente divergente).
+#   RESYNC_FAILED — dry-run provou no-op mas o `--resync` real falhou por rc≠0 (ex.:
+#                   `connection refused` / 5xx NÃO classificado como AuthDegradedError,
+#                   devolvido como rc cru por `_run`). A prova no-op já passou → a falha
+#                   é de EXECUÇÃO (transitória), não divergência → LIBERA o guard para
+#                   re-tentar no próximo ciclo (D6, emenda #86; simétrico ao discard do
+#                   caminho de exceção). Sem isso, um blip transitório barra a
+#                   auto-recuperação até o restart (incidente `home-bin` 2026-09-07).
+_AUTORESYNC_RECOVERED = "recovered"
+_AUTORESYNC_DIVERGENT = "divergent"
+_AUTORESYNC_RESYNC_FAILED = "resync_failed"
+
+
 # Assinatura too-many-deletes do bisync (#52): safety abort do rclone quando o scan
 # atual de Path1 tem >50% menos itens que o baseline `.lst` (uma mudança em massa
 # legítima removeu conteúdo). A ÚNICA dica que o rclone exibe é `Run with --force if
@@ -510,16 +529,20 @@ class RcloneEngine:
 
     async def _attempt_gated_autoresync(
         self, folder: FolderConfig, base_cmd: list[str], timeout: float | None
-    ) -> bool:
+    ) -> str:
         """Auto-recuperação gated de rc=7 stale-listings (ADR-019, #47).
 
         Prova, via `--resync --dry-run`, que o resync seria união no-op (data-safe,
         C2) ANTES de reconstruir o baseline com o `--resync` real. Divergência ou
         dry-run ambíguo → NÃO age (fail-safe: permanece degradado). `base_cmd` é o
         cmd de bisync SEM `--resync` (flags/excludes live, git_handling-aware).
-        Retorna True só quando o `--resync` real reconstruiu o baseline (rc==0);
         NÃO toca o marker (o tail de sucesso do caller faz). O guard de 1-tentativa
         e a limpeza do marker são responsabilidade do caller.
+
+        Retorna o desfecho (ADR-019 emenda #86) que o caller usa para decidir o guard:
+        `_AUTORESYNC_RECOVERED` (rc==0, sucesso) · `_AUTORESYNC_DIVERGENT` (dry-run
+        provou divergência → caller mantém o latch) · `_AUTORESYNC_RESYNC_FAILED`
+        (dry-run no-op mas `--resync` real falhou rc≠0 → caller LIBERA o guard).
         """
         log.info("[%s] [BISYNC_AUTORESYNC] attempted (rc=7 stale-listings)", folder.name)
         _rc, out, err = await _run(base_cmd + ["--resync", "--dry-run"], timeout=timeout)
@@ -529,21 +552,21 @@ class RcloneEngine:
                 "união no-op) — permanece degradado, recovery manual (playbook)",
                 folder.name,
             )
-            return False
+            return _AUTORESYNC_DIVERGENT
         rc, _o, rerr = await _run(base_cmd + ["--resync"], timeout=timeout)
         if rc != 0:
             summary, path = _capture_stderr("bisync-autoresync", folder.name, rerr)
             log.error(
                 "[%s] [BISYNC_AUTORESYNC] skipped (resync real falhou rc=%d): %s "
-                "(full stderr: %s)",
+                "(full stderr: %s) — falha transitória, guard liberado p/ re-tentar",
                 folder.name, rc, summary, path,
             )
-            return False
+            return _AUTORESYNC_RESYNC_FAILED
         log.info(
             "[%s] [BISYNC_AUTORESYNC] recovered (baseline reconstruído via --resync)",
             folder.name,
         )
-        return True
+        return _AUTORESYNC_RECOVERED
 
     async def bisync_folder(
         self,
@@ -635,7 +658,7 @@ class RcloneEngine:
             ):
                 self._autoresync_attempted.add(marker)
                 try:
-                    recovered = await self._attempt_gated_autoresync(folder, cmd, timeout)
+                    outcome = await self._attempt_gated_autoresync(folder, cmd, timeout)
                 except Exception:
                     # Attempt abortado por exceção (ex.: AuthDegradedError de storm
                     # remanescente — o mesmo storm que causou o rc=7; ou StuckJobError):
@@ -645,7 +668,21 @@ class RcloneEngine:
                     # um blip transitório barraria a auto-recuperação até o restart.
                     self._autoresync_attempted.discard(marker)
                     raise
-                if not recovered:
+                if outcome == _AUTORESYNC_RESYNC_FAILED:
+                    # Falha de EXECUÇÃO do `--resync` real (rc≠0) — ex.: `connection
+                    # refused` / 5xx não-classificado como AuthDegradedError, devolvido
+                    # como rc cru por `_run`. A prova no-op já passou → a falha é
+                    # transitória, NÃO divergência. Libera o guard para re-tentar no
+                    # próximo ciclo (D6/emenda #86, simétrico ao discard do caminho de
+                    # exceção acima). Sem isso, um blip barra a auto-recuperação até o
+                    # restart (incidente `home-bin` 2026-09-07). Permanece degradado
+                    # NESTE ciclo (ADR-005 sinaliza como hoje).
+                    self._autoresync_attempted.discard(marker)
+                    return False
+                if outcome != _AUTORESYNC_RECOVERED:
+                    # Divergência genuína (dry-run provou transfer/delete) → mantém o
+                    # latch do episódio (anti-thrash D4: não re-roda o dry-run a cada
+                    # ciclo num folder divergente). Permanece degradado.
                     return False
                 # Recuperado — cai no tail de sucesso abaixo.
             else:

@@ -1247,9 +1247,11 @@ async def test_autoresync_guard_cleared_on_success(tmp_path, monkeypatch):
     assert marker not in engine._autoresync_attempted, "sucesso deve limpar o guard"
 
 
-async def test_autoresync_resync_failure_stays_degraded(tmp_path, monkeypatch):
-    # F2 (review): dry-run prova no-op mas o --resync real falha (rc≠0) → NÃO
-    # recupera, permanece degradado (marker fica no guard: houve veredito, não sucesso).
+async def test_autoresync_resync_failure_releases_guard(tmp_path, monkeypatch):
+    # D6/#86: dry-run prova no-op mas o --resync real falha (rc≠0, ex.: connection
+    # refused não-classificado) → NÃO recupera neste ciclo (degradado, result False),
+    # MAS libera o guard (falha de EXECUÇÃO transitória, não divergência) para que o
+    # próximo ciclo re-tente. Sem isso, um blip barra a auto-resync até o restart.
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     app = _app()
     engine = RcloneEngine(app)
@@ -1261,7 +1263,44 @@ async def test_autoresync_resync_failure_stays_degraded(tmp_path, monkeypatch):
         result = await engine.bisync_folder(folder)
     assert result is False
     assert len(_real_resync_calls(captured)) == 1, "tentou o --resync real pós-prova"
-    assert marker in engine._autoresync_attempted, "veredito alcançado → tentativa consumida"
+    assert marker not in engine._autoresync_attempted, (
+        "falha rc≠0 do resync real é transitória → guard liberado p/ re-tentar (D6)"
+    )
+
+
+async def test_autoresync_retries_after_transient_resync_failure(tmp_path, monkeypatch):
+    # D6/#86 (regressão do incidente home-bin 2026-09-07): ciclo 1 tem o --resync real
+    # falhando por rc≠0 transitório (rede caiu no meio); ciclo 2, com a rede de volta,
+    # RE-TENTA e recupera. Antes do fix, o guard latcheava no ciclo 1 e o ciclo 2 nunca
+    # re-tentava (folder preso degradado até o restart).
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    app = _app()
+    engine = RcloneEngine(app)
+    folder = _folder(local_path=tmp_path / "local")
+    _prime_marker(app, folder)
+    captured: list[list[str]] = []
+    resync_rcs = iter([1, 0])  # 1º resync real falha (blip); 2º sucede
+
+    async def fake_run(cmd, timeout=None):
+        captured.append(cmd)
+        if "mkdir" in cmd:
+            return (0, "", "")
+        if "bisync" in cmd:
+            if "--dry-run" in cmd:
+                return (0, "", _DRYRUN_NOOP)
+            if "--resync" in cmd:
+                rc = next(resync_rcs)
+                return (rc, "", "" if rc == 0 else "connection refused")
+            return (7, "", _STALE_STDERR)  # bisync plano preso
+        return (0, "", "")
+
+    with patch("drive_sync.sync_engine._run", fake_run):
+        r1 = await engine.bisync_folder(folder)
+        r2 = await engine.bisync_folder(folder)
+    assert r1 is False, "ciclo 1: resync real falhou (blip) → degradado neste ciclo"
+    assert r2 is True, "ciclo 2: guard liberado → re-tenta e recupera"
+    assert len(_dryrun_calls(captured)) == 2, "ambos os ciclos re-rodaram o pre-check dry-run"
+    assert len(_real_resync_calls(captured)) == 2, "ambos os ciclos tentaram o --resync real"
 
 
 async def test_autoresync_guard_not_burned_on_exception(tmp_path, monkeypatch):
