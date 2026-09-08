@@ -50,7 +50,9 @@ que a segurança do dado seja **provada antes de agir**.
 
 **Guard de 1-tentativa-por-episódio:** um `set` de markers em `RcloneEngine` evita re-disparar o
 dry-run a cada ciclo num folder divergente preso. Limpo em qualquer sucesso de bisync; reseta no
-restart (novo processo → tentativa fresca, simétrico ao re-avaliar-janela de ADR-007).
+restart (novo processo → tentativa fresca, simétrico ao re-avaliar-janela de ADR-007). **O guard é
+consumido só por um veredito de _divergência_; uma falha de _execução_ transitória do `--resync`
+real o libera para re-tentar (emenda 2026-09-08, #86 — ver abaixo).**
 
 **Observabilidade:** tag dedicada `[BISYNC_AUTORESYNC]` (desfechos `attempted` / `recovered` /
 `skipped (divergent…)` / `skipped (resync real falhou…)`), no padrão das tags de ADR-012. Recuperação
@@ -88,3 +90,30 @@ double-signal com o watchdog externo (ADR-014). Investigação:
 - **`--resync-mode path1`** (usado na recuperação manual do Brief-pai) — **não usado no caminho auto:**
   inócuo depois de provar no-op (não há nada a resolver em direção alguma); a segurança vem do gate
   dry-run, não do mode.
+
+## Emenda 2026-09-08 (#86): guard liberado em falha transitória do `--resync` real
+
+**Status:** Aceito · Spec `spec-autoresync-rc7-stale-listings.md` v1→**v2** (D6, SP-T6).
+
+**Incidente-instância:** `home-bin` (2026-09-07), preso rc=7 por 12h+ → `[FOLDER_DEGRADED]` +
+re-alarme do watchdog (ADR-014) a cada 30min. Sequência: o folder estava em stale-listings
+**benigno** (auto-resync recuperava a cada ciclo); num episódio, o `--resync` real começou e caiu
+numa queda de rede da Proton (`connect: connection refused`). A rede voltou e **todos os outros
+folders** re-sincronizaram, mas o `home-bin` ficou preso até o restart manual.
+
+**Causa:** o guard de 1-tentativa (`_autoresync_attempted`) só era liberado em (a) sucesso ou (b)
+**exceção** durante a tentativa. Quando o `--resync` real retornava **rc≠0** (não levantava),
+`_attempt_gated_autoresync` engolia e retornava `False`, e o caller **não** liberava o guard → latch
+até o restart. `connection refused` é falha TCP-level, **não** um HTTP status → `_classify_rclone_stderr`
+retorna `None` → `_run` devolve rc≠0 cru (nunca levanta `AuthDegradedError`), escapando do `discard`
+do caminho de exceção que a teria salvado. O comportamento era **fiel** ao Spec v1 (§Error handling /
+D4) — logo, **re-divergência**: uma decisão de design refutada por evidência de campo, não bug de
+implementação.
+
+**Decisão:** `_attempt_gated_autoresync` passa a retornar um desfecho tri-estado
+(`recovered` / `divergent` / `resync_failed`); o caller **libera** o guard no `resync_failed` (falha de
+execução transitória — a prova no-op já passou), mantendo o latch **só** para `divergent` (o alvo real
+do anti-thrash D4). Alinha o caminho rc≠0 com o caminho de exceção, que já liberava o guard com o mesmo
+racional ("um blip transitório não deve barrar a auto-recuperação até o restart"). Fail-safe intocado:
+o `--resync` real só dispara após o dry-run provar união no-op. Distinto do #85 (divergência genuína —
+o gate recusa corretamente). Recuperação operacional do episódio: `systemctl --user restart drive-sync`.

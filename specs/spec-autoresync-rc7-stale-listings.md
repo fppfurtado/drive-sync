@@ -1,10 +1,19 @@
 # Spec: auto-recuperação data-safe de rc=7 stale-listings no daemon
 
 - Frozen at: 2026-08-27 (frozen after operator approval on 2026-08-27)
-- Spec version: v1
+- Spec version: v2
 - Source: Problem Brief `briefs/auto-resync-gated-rc7-stale-listings.md` v1 (FROZEN) — tracker #47
 - Status: FROZEN
-- Amendments: none
+- Amendments:
+  - **v1→v2 (2026-09-08, tracker #86):** o **quê** — falha de EXECUÇÃO do `--resync`
+    real (rc≠0) passa a **liberar** o guard de 1-tentativa (D4) em vez de consumi-lo;
+    o latch fica só para o caso de **divergência** provada. O **porquê** — evidência de
+    campo (incidente `home-bin` 2026-09-07): uma falha transitória do `--resync` real
+    (`connection refused` / 5xx não classificado como `AuthDegradedError`, devolvido
+    como rc cru) latcheava a auto-recuperação **até o restart**, violando `brief:S1`
+    (MTTR ~1 ciclo; o folder ficou 12h+ degradado). Adiciona **D6** + **SP-T6**, corrige
+    §Error handling. **Aprovação:** delegação do operador ("a bola está com você, pode
+    resolver", 2026-09-08); terminal via merge do PR de #86 (o operador executa o merge).
 
 > Sem PRD (rota Brief→Spec decidida com o operador 2026-08-27: feature de 1 job num
 > daemon existente; o "what" já vive no Brief). A traceabilidade cita o Brief por ID
@@ -68,6 +77,26 @@ falha→`False`, e o staleness ADR-005 sinaliza como hoje).
   provar não-confiável. Validado em `load_config` como os irmãos. Com `false`, o comportamento
   é exatamente o de hoje (loga `BISYNC_FAIL`, segue degradado).
 
+- **D6 — Falha de EXECUÇÃO do `--resync` real (rc≠0) libera o guard; só divergência o
+  mantém latcheado (emenda #86, 2026-09-08).** A evidência de campo (incidente `home-bin`
+  2026-09-07) refutou a decisão original de §Error handling ("resync real falha → retorna
+  `False` sem re-tentar → degradado até restart"): uma falha **transitória** do `--resync`
+  real — ex.: `connection refused` / 5xx que `_classify_rclone_stderr` NÃO reconhece como
+  `AuthDegradedError` (não é HTTP status), então `_run` devolve como rc≠0 cru em vez de
+  levantar — consumia a única tentativa do episódio (D4) e barrava a auto-recuperação
+  **pela vida inteira do processo**, violando `brief:S1` (o folder ficou 12h+ degradado, não
+  ~1 ciclo). **Correção:** o guard de 1-tentativa é **liberado** quando o `--resync` real
+  falha por rc≠0 — a prova no-op já passou, logo a falha é de **execução** (transitória),
+  não de **divergência**; o próximo ciclo re-tenta. Simétrico ao `discard` que o caminho de
+  **exceção** já fazia (`AuthDegradedError`/`StuckJobError` levantados) — a assimetria era só
+  um artefato de o rclone sinalizar via rc≠0 em vez de exceção. O latch permanece **só** para
+  a **divergência genuína** (dry-run provou transfer/delete) — o alvo real do anti-thrash de
+  D4. **Custo aceito:** um folder cujo `--resync` real falhe **persistentemente** (raro — infra
+  fora derruba antes o `_ensure_remote_dir`, retornando `False` antes de chegar à
+  auto-recuperação) re-roda o dry-run a cada ciclo; mesmo perfil de custo que o caminho de
+  exceção já aceitava. Fail-safe preservado: nada muda no gate data-safe (dry-run continua
+  provando no-op antes de qualquer `--resync` real).
+
 ### Cross-cutting
 
 - **Observabilidade (brief:S3).** Tag dedicada `[BISYNC_AUTORESYNC]`, greppável, no padrão
@@ -79,10 +108,12 @@ falha→`False`, e o staleness ADR-005 sinaliza como hoje).
   **silenciosa no notify-send** (só journal), como o reset de degraded de ADR-005 — não
   dispara alerta. O caso divergente/falho permanece degradado e sinaliza pelo caminho
   existente (staleness ADR-005 → watchdog ADR-014). Nenhum `Notifier` novo.
-- **Error handling.** Se o `--resync` real (pós-prova) falhar (ex.: 5xx no meio), retorna
-  `False` sem re-tentar (guard já marcou tentado) → degradado. Um `AuthDegradedError` ou
-  `StuckJobError` levantado durante o dry-run/resync propaga normalmente (o daemon já os
-  trata). O TOCTOU dry-run→resync sob o lock serializado (ADR-001) só admite mudança de FS
+- **Error handling.** Se o `--resync` real (pós-prova) falhar por rc≠0 (ex.: `connection
+  refused` / 5xx não-classificado no meio), retorna `False` (degradado NESTE ciclo) **e libera
+  o guard** para re-tentar no próximo ciclo — a falha é de execução (transitória), não
+  divergência (**D6/emenda #86**; a versão v1 mantinha o guard consumido → latch até restart,
+  refutado em campo). Um `AuthDegradedError` ou `StuckJobError` levantado durante o dry-run/resync
+  propaga normalmente (o daemon já os trata) e também libera o guard. O TOCTOU dry-run→resync sob o lock serializado (ADR-001) só admite mudança de FS
   local benigna (upload de arquivo novo é desejado, nunca ressurreição); o remote só muda via
   este daemon, que segura o lock — risco benigno, registrado como invalidator.
 
@@ -139,10 +170,22 @@ pytest persistido (regressão), no padrão de `tests/`.
   `brief:S3` — acceptance: os 3 docs referenciam a nova behavior; `--grep BISYNC_AUTORESYNC`
   aparece no playbook como sinal de investigação. — depends on: SP-T4
 
+- **SP-T6** (emenda #86): liberar o guard de auto-resync em falha rc≠0 do `--resync` real
+  (D6). `_attempt_gated_autoresync` passa a retornar um desfecho tri-estado
+  (`recovered`/`divergent`/`resync_failed`); o caller em `bisync_folder` faz `discard` do
+  marker no `resync_failed` (simétrico ao caminho de exceção). — implements `D6`; corrige a
+  regressão de `brief:S1` — acceptance (EARS):
+  - "WHEN o dry-run prova união no-op E o `--resync` real falha com rc≠0, o SISTEMA SHALL
+    manter o folder degradado NAQUELE ciclo (retorna `False`) MAS SHALL liberar o guard de
+    1-tentativa, de modo que o próximo ciclo re-tente a auto-recuperação." (D6 · brief:S1)
+  - "WHILE a divergência genuína foi provada pelo dry-run (transfer/delete), o SISTEMA SHALL
+    manter o guard latcheado no episódio (anti-thrash D4 preservado)." (D4)
+  - depends on: SP-T4
+
 ## Coverage check (cada item in-scope → ≥1 task)
 
 - `brief:J1` (auto-curar gated) → SP-T4
-- `brief:S1` (MTTR benigno → ~1 ciclo) → SP-T4 (acceptance 1)
+- `brief:S1` (MTTR benigno → ~1 ciclo) → SP-T4 (acceptance 1) + SP-T6 (não regride sob falha transitória do resync real — emenda #86)
 - `brief:S2` (ZERO auto-recuperação em divergência) → SP-T4 (acceptance 2)
 - `brief:S3` (observabilidade + sem double-signal) → SP-T4 (tag) + SP-T5 (playbook)
 - `brief:C1` (exceção restrita/fail-safe) → SP-T3 (kill-switch) + SP-T4 (fail-safe: falha→degradado)
