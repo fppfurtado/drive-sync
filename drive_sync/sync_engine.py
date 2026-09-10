@@ -596,6 +596,15 @@ class RcloneEngine:
         cmd += ["--conflict-resolve", "newer", "--conflict-loser", "delete"]
         # Cria diretórios vazios também.
         cmd += ["--create-empty-src-dirs"]
+        # Expiração de lock órfão (ADR-022, #88): passa --max-lock em TODA invocação
+        # de bisync do par. O rclone renova o lock a cada max_lock/2 enquanto o run
+        # vive (run legítimo longo segue protegido) e expira o lock cujo dono morreu
+        # após a janela — auto-curando o folder travado em rc=1 "prior lock file
+        # found". Único ponto de inserção: `cmd` é também o base_cmd passado à
+        # auto-recuperação rc=7 (_attempt_gated_autoresync), então o dry-run e o
+        # --resync real herdam a flag (semântica de lock uniforme). 0 = desligado.
+        if self.app.rclone.max_lock_seconds > 0:
+            cmd += ["--max-lock", f"{self.app.rclone.max_lock_seconds}s"]
 
         # Mescla excludes: usuário + presets automáticos (quando aplicável) + extras do daemon.
         # `bundle` não passa por aqui; `auto` injeta extras via extra_excludes quando há
