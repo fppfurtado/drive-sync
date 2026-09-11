@@ -37,6 +37,15 @@ rclone:
   # Gated por prova data-safe: qualquer divergência → NÃO age, permanece degradado.
   # true (default). false = comportamento legado (loga BISYNC_FAIL, recovery manual).
   auto_resync_stale_listings: true
+  # Expiração de lock de bisync órfão (ADR-022, #88). Um lock (.lck) cujo processo
+  # dono morreu sem liberá-lo (restart/reboot/kill do daemon no meio de um bisync)
+  # trava o folder com "rc=1 prior lock file found" indefinidamente — sem esta
+  # opção o rclone marca o lock como never-expire. Com max_lock_seconds > 0, o
+  # rclone renova o lock a cada max_lock/2 enquanto o run vive (run legítimo longo
+  # segue protegido) e o expira após a janela quando o dono morre (auto-cura).
+  # Default 3600 (1h; << staleness de 12h, então o folder se recupera antes de
+  # alarmar). 0 = desligado (never-expire, legado). > 0 deve ser >= 120 (rclone: 2m).
+  max_lock_seconds: 3600
 
 # -----------------------------------------------------------------------------
 # git_handling options (ADR-008):

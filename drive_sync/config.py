@@ -447,6 +447,12 @@ class RcloneConfig:
     # o --resync é união no-op, o daemon auto-recupera; false = comportamento legado
     # (loga BISYNC_FAIL, permanece degradado, recovery manual pelo playbook).
     auto_resync_stale_listings: bool = True
+    # #88 / ADR-022: idade (segundos) além da qual um lock de bisync órfão é
+    # considerado expirado (rclone --max-lock). Um lock cujo dono morreu deixa de
+    # ser renovado e expira após esta janela, auto-curando o folder travado; um run
+    # vivo renova o lock a cada max_lock/2, seguindo protegido. 0 = desligado
+    # (never-expire, comportamento legado); > 0 deve ser >= 120 (mínimo do rclone, 2m).
+    max_lock_seconds: int = 3600
 
 
 @dataclass
@@ -654,6 +660,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         auto_resync_stale_listings=bool(
             rclone_raw.get("auto_resync_stale_listings", True)
         ),
+        max_lock_seconds=int(rclone_raw.get("max_lock_seconds", 3600)),
     )
     if rclone.infra_storm_threshold < 1:
         raise ValueError(
@@ -670,6 +677,11 @@ def load_config(path: Path | None = None) -> AppConfig:
         raise ValueError(
             "rclone.max_job_runtime_seconds deve ser >= 0 (recebido "
             f"{rclone.max_job_runtime_seconds}); use 0 para desligar o kill switch (#45)."
+        )
+    if rclone.max_lock_seconds != 0 and rclone.max_lock_seconds < 120:
+        raise ValueError(
+            "rclone.max_lock_seconds deve ser 0 (desligado) ou >= 120 (recebido "
+            f"{rclone.max_lock_seconds}); o rclone exige --max-lock >= 2m (#88/ADR-022)."
         )
 
     git_raw = raw.get("git", {}) or {}
