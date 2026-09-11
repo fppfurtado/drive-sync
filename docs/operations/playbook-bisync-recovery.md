@@ -33,6 +33,7 @@ cat ~/.local/state/drive-sync/last-stderr-bisync-<folder_slug>.log
 
 - Mensagem contém `too many deletes` → **rc=1**, vá para a [Seção rc=1](#recuperação-rc1--too-many-deletes-perigoso) (**perigoso — leia inteiro antes de agir**).
 - Mensagem contém `cannot find prior Path1 or Path2 listings` / `Must run --resync to recover` → **rc=7**, vá para a [Seção rc=7](#recuperação-rc7--stale-listings-benigno).
+- Mensagem contém `prior lock file found` → **rc=1, lock órfão** (causa DISTINTA de too-many-deletes — dados/listings intactos, é só um guard de concorrência preso), vá para a [Seção lock órfão](#recuperação-rc1--lock-órfão-benigno).
 
 > **Regra transversal — NUNCA `--force` cego.** A dica `Run with --force if desired` do rclone propaga as deleções detectadas. Só é seguro depois de você ter confirmado que o conteúdo "deletado" não é dado único (existe backup em outro lugar) **e** ter decidido conscientemente que ele deve sumir do outro path. Este playbook nunca usa `--force`; usa `--resync` (reconstrução de baseline) com a ordem certa.
 
@@ -84,7 +85,55 @@ systemctl --user start drive-sync.service
 systemctl --user start drive-sync-watchdog.timer   # se você o parou
 ```
 
-Verifique a [recuperação](#verificação-comum). Se o pré-check de integridade **não** bateu (divergência real, não só estado perdido), trate como o caso rc=1 abaixo — decida a direção conscientemente.
+Verifique a [recuperação](#verificação-comum). Se o pré-check de integridade **não** bateu (divergência real, não só estado perdido), trate como o caso rc=1 too-many-deletes abaixo — decida a direção conscientemente.
+
+---
+
+## Recuperação rc=1 — lock órfão (benigno)
+
+O bisync abortou `prior lock file found`: um `.lck` cujo processo dono morreu (restart/kill do daemon
+mid-bisync, reboot, power-loss) sem liberar o lock. **Causa DISTINTA** de too-many-deletes abaixo —
+dados e listings `.lst` intactos, é só um guard de concorrência preso.
+
+> **Desde [ADR-022](../decisions/ADR-022-orphaned-lock-max-lock.md) (#88) o caso comum auto-expira.**
+> Com `rclone.max_lock_seconds` > 0 (default 3600s/1h), todo lock escrito pelo daemon expira
+> automaticamente `<dur>` após a última renovação quando o dono morre — o próximo ciclo desemboca em
+> `rc=7 stale-listings` (ver [Seção rc=7](#recuperação-rc7--stale-listings-benigno)), que o auto-resync
+> de ADR-019 recupera sozinho no caso benigno. Confirme com `journalctl --user -u drive-sync --grep
+> "BISYNC_AUTORESYNC"` (`recovered`).
+>
+> Este procedimento manual é o **fallback** para quando a auto-expiração ainda não agiu (dentro da
+> janela `<dur>`) ou quando o lock é **never-expire pré-existente** (escrito ANTES do deploy desta
+> feature — `--max-lock` de um run posterior NÃO o expira; a expiração é pelo `TimeExpires` gravado no
+> próprio lock, não pelo flag do leitor). Todo `.lck` never-expire remanescente exige esta migração
+> manual **uma vez**; depois disso, todo lock novo é finite-expiry sob a feature.
+
+**Diagnóstico — o dono está mesmo morto?**
+
+```bash
+# Localiza o .lck do par (mesmo prefixo dos .lst do folder degradado — ver Passo 0).
+LCK=~/.cache/rclone/bisync/<prefixo-do-par>.lck
+cat "$LCK"   # {"PID": "<pid>", "TimeRenewed": "...", "TimeExpires": "..."}
+
+# Confirma que o PID dono NÃO existe mais (nunca remova um lock de processo vivo):
+kill -0 <pid-do-lock> 2>/dev/null && echo "AINDA VIVO — não remover" || echo "morto, seguro remover"
+
+# Confirma que nenhum rclone toca este par agora:
+ps aux | grep "[r]clone.*bisync"
+```
+
+**Recuperação (data-safe, sem `--resync` manual — só destrava o guard):**
+
+```bash
+systemctl --user stop drive-sync.service   # ver Pré-condição comum acima
+rm "$LCK"
+systemctl --user start drive-sync.service
+```
+
+Verifique a [recuperação](#verificação-comum). Se o daemon voltar a abortar (agora `rc=7`
+stale-listings), isso é **esperado e benigno** sob ADR-022/ADR-019 — deixe o próximo ciclo do
+auto-resync agir, ou siga a [Seção rc=7](#recuperação-rc7--stale-listings-benigno) se preferir
+confirmar manualmente.
 
 ---
 
