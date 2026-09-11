@@ -1,11 +1,12 @@
 # Spec: auto-expiração de lock órfão de bisync via `--max-lock` nativo
 
 - Frozen at: 2026-09-10 (frozen after operator instruction "congele" on the rendered draft, 2026-09-10)
-- Spec version: v1
-- Source: Problem Brief `briefs/orphaned-bisync-lock-recovery.md` v1 (FROZEN) — tracker #88
+- Spec version: v2
+- Source: Problem Brief `briefs/orphaned-bisync-lock-recovery.md` v2 (FROZEN) — tracker #88
 - Status: FROZEN
-- Relation: **Extends (not amends)** `specs/spec-autoresync-rc7-stale-listings.md` (v2, FROZEN) — comportamento NOVO e distinto (expiração preventiva de lock via flag nativa) sobre a MESMA superfície de montagem de cmd de `bisync_folder`. A LÓGICA do branch `rc != 0` de recuperação daquele Spec fica byte-intacta; a flag `--max-lock` é herdada pelas invocações de `--resync`/dry-run daquele branch apenas por serem montadas pelo builder base comum (D4) — o rc7 Spec NÃO é re-congelado nem re-versionado (nenhuma decisão dele muda). Ambos são braços-código da família de recovery (Brief-pai `briefs/recovery-safety-abort-bisync.md`).
-- Amendments: none
+- Relation: **Extends (not amends)** `specs/spec-autoresync-rc7-stale-listings.md` (v2, FROZEN) — comportamento NOVO e distinto (expiração preventiva de lock via flag nativa) sobre a MESMA superfície de montagem de cmd de `bisync_folder`. A LÓGICA do branch `rc != 0` de recuperação daquele Spec fica byte-intacta; a flag `--max-lock` é herdada pelas invocações de `--resync`/dry-run daquele branch apenas por serem montadas pelo builder base comum (D4) — o rc7 Spec NÃO é re-congelado nem re-versionado (nenhuma decisão dele muda). Ambos são braços-código da família de recovery (Brief-pai `briefs/recovery-safety-abort-bisync.md`). **A relação com o rc7 é agora também de COMPOSIÇÃO em runtime** (D6): expirar o lock desemboca num rc=7 que aquele Spec recupera.
+- Amendments:
+  - **v1→v2 (2026-09-10, tracker #88 — diagnóstico `debug`):** o **quê** — corrige o modelo de mecanismo (Approach, D1, D5) e adiciona **D6** (composição-com-rc7 + dependência de `auto_resync_stale_listings` + migração one-time); reescreve S1, a acceptance de SP-T3 e o coverage; adiciona **SP-T5** (migração). O **porquê** — o teste comportamental de SP-T3 refutou a v1: `--max-lock` é **prevenção write-time** (a expiração é governada pelo `TimeExpires` GRAVADO no lock, não pelo flag do leitor), e ultrapassar um lock expirado **deleta as listings → rc=7 stale-listings**, não um proceed limpo. Recuperação real = compor com ADR-019 (brief:F9). Absorve o Brief v2 (F9/F10). **Aprovação:** instrução do operador sobre o rascunho renderizado (2026-09-10).
 
 > Sem PRD (rota Brief→Spec, precedente da família: feature de 1 job num daemon existente; o "what"
 > vive no Brief). Traceabilidade cita o Brief por ID (`brief:J1`, `brief:S1`…) no lugar de `PR*`.
@@ -17,23 +18,28 @@ flag nativa do rclone (`--max-lock`) às invocações de `bisync` de um par + um
 testes. SEM subseções de Architecture/Data-model/Interfaces. Só as decisões que os open questions
 do Brief exigem + o cross-cutting de doc-sync.
 
-**Approach:** o abort `rc=1 prior lock file found` (F5 do Brief) surge de um `.lck` cujo processo
-dono morreu sem liberá-lo; sem `--max-lock`, o rclone grava expiração efetivamente infinita (F3), então
-o folder trava indefinidamente. A correção é passar `--max-lock <dur>` em toda invocação de `bisync`
-do par: o rclone RENOVA o lock a cada `<dur>`/2 enquanto o run vive (F3, observado ao vivo) — logo um
-run legítimo longo segue protegido — e um lock cujo dono morreu deixa de ser renovado e expira `<dur>`
-após a última renovação, permitindo que o próximo ciclo prossiga com o `.lst` intacto, SEM `--resync`.
-Nenhum código de detecção de liveness custom; a auto-cura é do próprio backend. O daemon fica
-intocado; a sinalização degraded (ADR-005/watchdog ADR-014) permanece como backstop para a janela
-`<dur>` até a expiração e para o caso (raro) de um bisync concorrente genuíno legítimo.
+**Approach:** o abort `rc=1 prior lock file found` (brief:F5) surge de um `.lck` cujo processo dono
+morreu sem liberá-lo; sem `--max-lock`, o rclone grava expiração efetivamente infinita (never-expire,
+brief:F3), então o folder trava indefinidamente. A correção é `--max-lock <dur>` em toda invocação de
+`bisync` do par, funcionando como **PREVENÇÃO write-time** (não como recuperador direto — brief:F9): o
+rclone grava `TimeExpires = now + <dur>` e RENOVA a cada `<dur>`/2 enquanto o run vive (brief:F3,
+observado ao vivo — logo um run legítimo longo segue protegido) e, quando o dono morre, o lock deixa de
+renovar e **expira `<dur>` após a última renovação**. A recuperação do estado resultante NÃO é um proceed
+limpo: ao ultrapassar um lock expirado, o rclone **remove o lock E deleta as listings**, abortando `rc=7
+stale-listings` (brief:F9) — que o braço rc=7 (ADR-019, Spec estendido) então recupera de forma data-safe
+(dry-run prova união no-op → `--resync` real; divergência → degradado). Assim a feature **COMPÕE** com o
+rc7 (D6): `--max-lock` converte o wedge permanente rc=1 num rc=7 auto-recuperável no caso benigno. Nenhum
+código de detecção de liveness custom. O daemon fica quase intocado (só a flag no cmd); a sinalização
+degraded (ADR-005/watchdog) permanece como backstop para a janela `<dur>` até a expiração, para o caso
+divergente, e para o caso (raro) de um bisync concorrente genuíno legítimo.
 
 ### Design decisions (resolvem os open questions do Brief)
 
 - **D1 — Mecanismo = flag nativa `--max-lock`, não recuperação reativa custom** (resolve o crivo do
-  Brief). O rclone provê expiração de lock por idade + renovação-enquanto-vivo (F3). Candidatos
-  hand-rolled (limpeza no shutdown handler; PID-probe) são rejeitados no Brief (§Deliberate exclusions):
-  o shutdown handler cobre só morte graciosa; o PID-probe reinventa a liveness que o backend já faz e
-  domina só se `--max-lock` falhasse o teste de F3 — que passou. Preserva C2 (não reinventar padrão nativo).
+  Brief). O rclone provê expiração via `TimeExpires` gravado + renovação-enquanto-vivo (brief:F3/F9).
+  Candidatos hand-rolled (limpeza no shutdown handler; PID-probe) são rejeitados no Brief (§Deliberate
+  exclusions): o shutdown handler cobre só morte graciosa; o PID-probe reinventa a liveness que o backend
+  já faz. Preserva C2 (não reinventar padrão nativo).
 
 - **D2 — Knob `rclone.max_lock_seconds: int` (default `3600`), espelhando `max_job_runtime_seconds`.**
   `0` = desligado = comportamento de hoje (nenhum `--max-lock` no cmd → lock never-expire); `> 0` passa
@@ -53,10 +59,29 @@ intocado; a sinalização degraded (ADR-005/watchdog ADR-014) permanece como bac
   reabriria a janela que este Spec fecha. Ponto de inserção: onde o `_base_cmd()`/builder do bisync
   monta os flags globais do par (não em `mkdir`/`copyto`-de-bundle — `--max-lock` é conceito de bisync).
 
-- **D5 — Sem código de auto-cura no daemon; a expiração é do backend.** Diferente do rc7 (que precisa
-  de lógica gated em `bisync_folder`), aqui não há branch novo de recuperação: a flag muda o
-  comportamento do lock e o fluxo normal de retry (watcher + periodic full-sync) já re-tenta o par a
-  cada ciclo. A primeira tentativa após a expiração simplesmente sucede. Menor superfície de código.
+- **D5 — Sem código de auto-cura NOVO no daemon; a expiração é do backend e a recuperação é do braço
+  rc7 existente.** Não há branch novo de recuperação neste Spec: a flag só muda o write-time do lock; o
+  fluxo normal de retry (watcher + periodic full-sync) re-tenta o par a cada ciclo, e a primeira tentativa
+  após a expiração cai em `rc=7 stale-listings` (brief:F9), tratado pelo branch `rc != 0` já existente
+  (ADR-019). Menor superfície de código; nenhuma lógica de lock custom.
+
+- **D6 — A recuperação COMPÕE com o rc7; dependência dura de `auto_resync_stale_listings`; migração
+  one-time (absorve brief:F9/F10).** Consequências do modelo corrigido:
+  - **Composição:** expirar o lock não recupera sozinho — desemboca num rc=7 (o rclone deleta as
+    listings ao ultrapassar o lock expirado). O sucesso vem do braço ADR-019 (dry-run no-op → `--resync`).
+    Logo esta feature tem **dependência dura de `rclone.auto_resync_stale_listings=true`**: com ele
+    `false`, `--max-lock` converte o wedge rc=1 num wedge rc=7 (ainda degradado) — melhora parcial
+    (o rc=7 é diagnosticável/recuperável pelo playbook), mas não auto-cura. Registrado como constraint
+    de runtime; sinalizado no ADR-022 (SP-T4).
+  - **Migração one-time (SP-T5):** locks never-expire PRÉ-EXISTENTES (`TimeExpires` ~infinito, escritos
+    antes desta feature) NUNCA são expirados por `--max-lock` (o leitor honra o `TimeExpires` gravado —
+    brief:F10); a feature só previne os FUTUROS. Os pré-existentes exigem `rm` manual one-time
+    (documentado no ADR-022 + playbook). NÃO se adiciona código de limpeza de lock never-expire no
+    startup: uma limpeza SEGURA exigiria prova de dono-morto (C1), e para essa classe o sinal de
+    idade/renovação é inútil (um never-expire nunca renova, viva ou morta a origem) → precisaria justo
+    do PID-probe que D1 rejeita (motivo INTRÍNSECO). A classe é FINITA (só os locks órfãos já existentes
+    no deploy) e é drenada pela migração one-time SP-T5 — NÃO pela feature: um folder com lock
+    never-expire fica travado até o `rm` manual (sem auto-dreno; F10). Custo aceito = uma migração por host.
 
 ### Cross-cutting
 
@@ -99,42 +124,60 @@ vivo?) foi retirado no frame por teste ao vivo (F3), não re-spikado aqui.
     rclone), de modo que uma segunda invocação concorrente sobre o mesmo par continua bloqueada." (brief:N1 · S2)
   - depends on: SP-T1
 
-- **SP-T3**: teste de regressão. Cobre S1 no seu núcleo COMPORTAMENTAL de forma rápida e determinística
-  (sem esperar 2min de rclone vivo): plantar um `.lck` para o par com `TimeRenewed`/mtime mais VELHO que
-  `max_lock_seconds`, rodar `bisync_folder` com o knob>0, e assertar que o rclone trata o lock como
-  expirado e o bisync PROSSEGUE (sem abort `rc=1 prior lock file found`) — este é o caminho de auto-cura
-  de J1/S1. Mais os testes de superfície: montagem do cmd e validação de config. — serves `brief:S1`,
-  `brief:S2` — acceptance: pytest cobre
-  (a) com um `.lck` de idade > `max_lock_seconds` plantado, `bisync_folder` (knob>0) prossegue sem
-  `rc=1 prior lock file found` [núcleo comportamental de S1];
-  (b) cmd inclui `--max-lock 3600s` no default e omite `--max-lock` com knob=0;
-  (c) `load_config` rejeita `1..119` e aceita `0`/`>=120`.
-  **Cap de teste (LOG explícito, no ADR — SP-T4):** (i) a RENOVAÇÃO-enquanto-vivo (o pilar de que run
-  legítimo longo não se auto-expira) foi validada ao vivo no frame (F3, bisync local-local ~100s) e NÃO
-  é re-testada em pytest (exigiria um rclone vivo >2min, lento/flaky); (ii) o bloqueio de um SEGUNDO
-  processo concorrente genuíno (S2) NÃO é coberto por teste automatizado (exigiria dois rclone vivos
-  colidindo) — repousa no comportamento nativo do rclone + F3; o sinal de regressão para ambos é o
-  reaparecimento de `[BISYNC_FAIL] prior lock file found` com um bisync vivo em produção (invalidator).
-  — depends on: SP-T1, SP-T2
+- **SP-T3**: teste de regressão. Cobre o MECANISMO corrigido (brief:F9) de forma rápida e determinística
+  (sem esperar 2min de rclone vivo), via `rclone bisync` local-local direto num `--workdir` isolado
+  (`bisync_folder` exigiria um remote nomeado — cap abaixo). Planta um `.lck` sobre um par com baseline
+  limpo e observa o comportamento por `TimeExpires`. Mais os testes de superfície (nosso código): montagem
+  do cmd e validação de config. — serves `brief:S1`, `brief:S2`, `brief:N1` — acceptance: pytest cobre
+  (a) [mecanismo, brief:F9] um `.lck` com `TimeExpires` no PASSADO (feature-written expirado) NÃO produz
+  abort `rc=1 prior lock file found` (o lock é ultrapassado/removido); o run aborta `rc=7 stale-listings`
+  (as listings são purgadas) — provando que a expiração destrava o rc=1 e desemboca no caminho rc=7;
+  (b) [contraste, brief:F9/F10 + S2/N1] um `.lck` com `TimeExpires` no FUTURO (never-expire, pré-feature)
+  aborta `rc=1 prior lock file found` E o flag `--max-lock` do leitor NÃO muda isso (expiração é pelo
+  `TimeExpires` gravado, não pelo flag) — pinando por que never-expire pré-existentes exigem migração (F10)
+  e por que um lock vivo/renovado segue bloqueando concorrência (S2/N1);
+  (c) [nosso código] cmd inclui `--max-lock 3600s` no default e omite com knob=0; `load_config` rejeita
+  `1..119` e aceita `0`/`>=120`.
+  Testes de integração (a)/(b) `skipif` sem rclone no PATH.
+  **Cap de teste (LOG explícito no ADR — SP-T4):** (i) a COMPOSIÇÃO fim-a-fim (rc=7 → ADR-019 dry-run
+  no-op → `--resync` → sucesso) roda em `bisync_folder` contra um remote real → NÃO automatizada aqui; o
+  gate `_dryrun_resync_is_noop` já tem cobertura própria nos testes do ADR-019, e o no-op do caso benigno
+  foi observado ao vivo no `debug` (2026-09-10); (ii) a RENOVAÇÃO-enquanto-vivo foi validada ao vivo no
+  frame (brief:F3, ~100s) e não é re-testada (exigiria rclone vivo >2min). Sinal de regressão para ambos:
+  reaparecimento de `prior lock file found` com bisync vivo em produção (invalidator). — depends on:
+  SP-T1, SP-T2
 
 - **SP-T4**: doc-sync + ADR (obrigatório: muda o comportamento do invariante documentado). — (a) novo
-  `docs/decisions/ADR-022-orphaned-lock-auto-expira-via-max-lock.md` (decisão + a evidência viva de F3 +
-  o cap do teste de SP-T3 + que o kill de ADR-018 é fonte de lock órfão agora coberta); (b) nota mínima
-  no invariante `bisync errors do NOT auto-recover` em `CLAUDE.md` apontando o ADR-022 (o lock órfão
-  auto-expira; distinto do auto-resync rc=7); (c) atualizar `docs/operations/playbook-bisync-recovery.md`
-  notando que o `rm` manual do `.lck` órfão agora é fallback (o caso comum auto-expira em `<dur>`). —
-  serves doc-sync — acceptance: os 3 docs referenciam a behavior; `prior lock file found` aparece no
-  playbook com o ponteiro para `max_lock_seconds`. — depends on: SP-T2
+  `docs/decisions/ADR-022-orphaned-lock-max-lock.md` (decisão + o MODELO corrigido: `--max-lock` é
+  prevenção write-time que COMPÕE com o rc7/ADR-019 — brief:F9; a dependência dura de
+  `auto_resync_stale_listings=true` — D6; que o kill de ADR-018 é fonte de lock órfão agora coberta; a
+  evidência viva do frame/`debug`; os caps de teste de SP-T3); (b) nota mínima no invariante `bisync
+  errors do NOT auto-recover` em `CLAUDE.md` apontando o ADR-022 (lock órfão feature-written auto-expira
+  e é recuperado pelo caminho rc=7; distinto e COMPOSTO com o auto-resync rc=7); (c) atualizar
+  `docs/operations/playbook-bisync-recovery.md`: o `rm` manual do `.lck` órfão vira fallback para o caso
+  comum feature-written (auto-expira em `<dur>`) E o passo obrigatório da MIGRAÇÃO one-time (SP-T5). —
+  serves doc-sync — acceptance: os 3 docs referenciam a behavior composta + a dependência de
+  `auto_resync_stale_listings`; `prior lock file found` aparece no playbook com o ponteiro para
+  `max_lock_seconds` + a nota de migração. — depends on: SP-T2, SP-T5
+
+- **SP-T5** (migração, brief:F10/D6): documentar a migração one-time — locks never-expire pré-existentes
+  não são cobertos por `--max-lock` e exigem `rm` manual uma vez por host. NÃO é código (D6 rejeita
+  limpeza automática no startup). Entrega: uma seção "Migração one-time" no ADR-022 e/ou no playbook, com
+  o comando de diagnóstico (`grep` do `TimeExpires` distante nos `.lck` de `~/.cache/rclone/bisync/`) e o
+  `rm` seguro (gated por dono-morto, como o recovery do incidente 2026-09-09). — serves `brief:F10` (o
+  fato que a torna necessária) — acceptance: o doc lista (i) como identificar um `.lck` never-expire
+  órfão, (ii) o `rm` seguro, (iii) que após a migração todo lock futuro é finite-expiry. — depends on: —
 
 ## Coverage check (cada item in-scope → ≥1 task)
 
-- `brief:J1` (auto-curar lock órfão sob prova de dono-morto) → SP-T2 (a expiração-por-não-renovação É a prova) + SP-T3(a) (regressão comportamental: lock velho → prossegue)
-- `brief:S1` (MTTR: folder retoma sozinho dentro da janela) → SP-T2 (acc 1) + **SP-T3(a) cobre o núcleo comportamental** (lock expirado → bisync prossegue); a parte "renovação-enquanto-vivo não auto-expira run legítimo" fica no cap de teste, coberta por F3 (frame, ao vivo). NARROWING consciente: o critério verificável de S1 é coberto por teste rápido comportamental (SP-T3a) + evidência viva do frame (F3), não por um teste de expiração em tempo-real — ver §Deliberate exclusions.
-- `brief:S2` (bisync concorrente genuíno segue bloqueado) → SP-T2 (acc 2) via comportamento nativo do rclone (lock renovado) + F3; **NÃO coberto por teste automatizado** (exigiria dois rclone vivos colidindo) — cap LOG-ado em SP-T3(ii) + ADR. Sinal de regressão: reaparecimento de `prior lock file found` em produção.
-- `brief:C1` (exceção restrita/fail-safe via kill-switch) → SP-T1 (knob, `0`=off)
+- `brief:J1` (auto-curar lock órfão sob prova de dono-morto) → SP-T2 (a flag limita a vida do lock = a "prova de dono-morto" operacional) + SP-T3(a) (mecanismo: expirado → destrava rc=1 → rc=7) + composição com ADR-019 (D6, cap fim-a-fim LOG-ado)
+- `brief:S1` (MTTR: folder retoma sozinho no caso benigno) → SP-T2 + SP-T3(a) cobre o MECANISMO (expiração destrava o rc=1 e desemboca no rc=7); a recuperação fim-a-fim (rc=7→ADR-019→sucesso) é COMPOSTA e coberta pelos testes próprios do ADR-019 + observação viva do `debug`. NARROWING consciente: o critério verificável de S1 é coberto por (teste rápido do mecanismo SP-T3a) + (cobertura pré-existente do gate ADR-019) + (evidência viva), não por um e2e em tempo-real através de `bisync_folder`+remote — ver §Deliberate exclusions.
+- `brief:S2` (bisync concorrente genuíno segue bloqueado) → SP-T2 (acc 2) + SP-T3(b) (contraste: lock não-expirado bloqueia rc=1) via comportamento nativo (lock renovado); o caso de DOIS processos vivos colidindo não é automatizado (cap LOG-ado). Sinal de regressão: reaparecimento de `prior lock file found` com bisync vivo em produção.
+- `brief:C1` (exceção restrita/fail-safe via kill-switch) → SP-T1 (knob, `0`=off) + D6 (dependência de `auto_resync_stale_listings`, fail-safe herdado do ADR-019)
 - `brief:C2` (não reinventar padrão nativo) → SP-T2 (D1: flag nativa, sem liveness custom)
 - `brief:C3` (custo proporcional) → SP-T1 + SP-T2 (uma flag, sem branch novo)
-- `brief:N1` (não quebrar concorrência genuína) → SP-T2 (acceptance 2)
+- `brief:N1` (não quebrar concorrência genuína) → SP-T2 (acc 2) + SP-T3(b)
+- `brief:F10` (locks pré-existentes não cobertos → migração) → SP-T5
 - doc-sync (invariante muda) → SP-T4
 - Sem task órfã.
 
@@ -149,15 +192,22 @@ vivo?) foi retirado no frame por teste ao vivo (F3), não re-spikado aqui.
   causas/famílias, já cobertas por seus próprios Specs/issues (rc7 Spec; #70; ADR-005/014). Não armados.
 - Candidato "limpeza no shutdown handler" e "PID-probe custom" — rejeitados no Brief §Deliberate
   exclusions; não re-litigados aqui (D1 os herda). O PID-probe permanece o fallback contra-factual SÓ
-  se F3 tivesse falhado — não aplicável (F3 verde).
-- **Cobertura de teste em tempo-real de S1/S2 — carried-narrowed (decisão consciente).** O critério
-  verificável de S1 é coberto por um teste comportamental RÁPIDO (SP-T3a: lock de idade>janela →
-  bisync prossegue) + a evidência viva do frame (F3), NÃO por um teste de expiração/renovação em
-  tempo-real (>2min de rclone vivo, lento/flaky em CI). S2 (dois processos concorrentes) não é
-  automatizável barato e repousa no comportamento nativo + F3, com cap LOG-ado (SP-T3) e sinal de
-  regressão em produção (invalidator). Por quê: esforço proporcional (C3) + precedente da família (o
-  rc7 Spec validou seu mecanismo por spike, não por teste de tempo-real). Surfaçado pela leitura cega
-  independente (blind-critic J1/J3) e disposto ANTES do freeze.
+  se o mecanismo nativo falhasse — não aplicável.
+- Candidato "limpeza automática de lock never-expire pré-existente no startup" — NÃO adotado (D6):
+  uma limpeza segura exigiria o PID-probe de dono-morto que D1 rejeita (o sinal de idade é inútil para
+  never-expire — motivo intrínseco). `Value-rejected:` escopo desproporcional; a classe é finita
+  (pré-existentes no deploy) e drenada pela migração one-time SP-T5 (NÃO pela feature — o folder travado
+  não re-sincroniza até o `rm`). (Se algum dia locks never-expire pré-feature se provarem numerosos/
+  persistentes, reavaliar — mas sem valor afirmado isolado hoje.)
+- **Cobertura de teste fim-a-fim de S1/S2 — carried-narrowed (decisão consciente).** O critério
+  verificável de S1 é coberto pela CADEIA: (i) SP-T3(a) prova o MECANISMO rápido/determinístico (lock
+  expirado destrava rc=1 → rc=7); (ii) o gate ADR-019 (`_dryrun_resync_is_noop`) que recupera o rc=7 já
+  tem cobertura própria nos testes do rc7 Spec; (iii) o no-op do caso benigno foi observado ao vivo no
+  `debug`. NÃO se automatiza o e2e através de `bisync_folder`+remote real (exigiria um Proton remote;
+  lento/frágil). S2 (dois processos vivos colidindo) não é automatizável barato — cap LOG-ado (SP-T3) +
+  sinal de regressão em produção (invalidator). Por quê: esforço proporcional (C3) + precedente da
+  família (o rc7 Spec validou seu mecanismo por spike/evidência viva, não por e2e). Surfaçado pela
+  leitura cega independente (blind-critic J1/J3) e pelo diagnóstico `debug`; disposto ANTES do freeze.
 
 ## Risks / unknowns
 
