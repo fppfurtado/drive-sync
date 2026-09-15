@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# agent-kit floor pre-commit guard: refuse a commit while HEAD is the default branch (land via a PR).
+# The pre-push guard refuses only at push time, after the commits already sit on the local default branch, where
+# nothing surfaces them later (#1668). Copy to the target's .githooks/pre-commit (compose by hand with any other
+# pre-commit guard there: git runs one file per hook), commit it, and run `git config core.hooksPath .githooks`
+# once per clone. Protected branch: `git config hooks.protectedBranch`, else origin/HEAD, else main or master.
+# A repo's first commit passes (there is nothing to open a PR against). Override: `git commit --no-verify`.
+[ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || exit 0
+cur="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || exit 0
+git rev-parse --verify --quiet HEAD >/dev/null || exit 0
+protected="$(git config hooks.protectedBranch 2>/dev/null)"
+if [ -z "$protected" ]; then
+  protected="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"
+  protected="${protected#refs/remotes/origin/}"
+fi
+if [ -z "$protected" ]; then
+  if git show-ref --verify --quiet refs/heads/main; then protected=main; else protected=master; fi
+fi
+[ "$cur" = "$protected" ] || exit 0
+echo "commit blocked: you are on the default branch '$cur'." >&2
+echo "agent-kit floor: commit on a work branch (a worktree on work/<slug>), then land it via a PR." >&2
+echo "(deliberate override: git commit --no-verify.)" >&2
+exit 1
