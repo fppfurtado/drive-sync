@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# agent-kit floor pre-push-guard — refuse a direct push to the default branch (generated; do not edit —
-# reinstall via agent-kit onboarding/install_pre_push_guard.py). The sovereign, zero-cost
-# substitute for server-side branch protection: land via a PR, not a direct push.
+# agent-kit floor pre-push guard: refuse a direct push to the default branch (land via a PR).
+# The sovereign, zero-cost substitute for server-side branch protection. Copy to the target's .githooks/pre-push
+# (compose by hand with any other pre-push guard there: git runs one file per hook), commit it, and run
+# `git config core.hooksPath .githooks` once per clone. Protected branch: `git config hooks.protectedBranch`,
+# else origin/HEAD, else main or master. Deliberate override: `git push --no-verify`.
 protected="$(git config hooks.protectedBranch 2>/dev/null)"
-[ -n "$protected" ] || protected="master"
+if [ -z "$protected" ]; then
+  protected="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"
+  protected="${protected#refs/remotes/origin/}"
+fi
+if [ -z "$protected" ]; then
+  if git show-ref --verify --quiet refs/heads/main; then protected=main; else protected=master; fi
+fi
 while read -r local_ref local_sha remote_ref remote_sha; do
-    [ -n "$remote_ref" ] || continue
-    if [ "$remote_ref" = "refs/heads/$protected" ] && [ -n "${local_sha//0/}" ]; then
-        echo "pre-push blocked: refusing a direct push to the default branch '$protected'." >&2
-        echo "agent-kit floor: land via a PR (work/<slug> -> PR -> merge), not a direct push." >&2
-        echo "(deliberate override: git push --no-verify.)" >&2
-        exit 1
-    fi
+  [ -n "$remote_ref" ] || continue
+  if [ "$remote_ref" = "refs/heads/$protected" ] && [ -n "${local_sha//0/}" ]; then
+    echo "pre-push blocked: refusing a direct push to the default branch '$protected'." >&2
+    echo "agent-kit floor: land via a PR (work/<slug> -> PR -> merge), not a direct push." >&2
+    echo "(deliberate override: git push --no-verify.)" >&2
+    exit 1
+  fi
 done
 exit 0
