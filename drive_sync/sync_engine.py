@@ -568,29 +568,20 @@ class RcloneEngine:
         )
         return _AUTORESYNC_RECOVERED
 
-    async def bisync_folder(
+    def build_bisync_cmd(
         self,
         folder: FolderConfig,
-        local_override: Path | None = None,
+        local: Path,
+        remote: str,
         extra_excludes: list[str] | None = None,
-    ) -> bool:
-        """Executa bisync para uma tarefa. Retorna True em sucesso.
+    ) -> list[str]:
+        """Monta o cmd de bisync do par (SEM `--resync`/`--dry-run`).
 
-        extra_excludes (ADR-008): padrões adicionais injetados pelo daemon em
-        modo `auto` — paths de repos descobertos viram excludes para que o
-        bisync cubra só conteúdo não-repo (skip excluído do sync; bundle
-        sincronizado em flow separado).
+        Fonte ÚNICA dos flags/excludes do bisync. Extraído de `bisync_folder`
+        (#94) para que o diagnóstico `--dry-run-resync` rode com exatamente os
+        mesmos flags que o daemon usaria — transcrevê-los à mão daria um veredito
+        que não corresponde ao que o daemon fará. Refactor puro: mesma sequência.
         """
-        local = local_override or folder.local_path
-        remote = remote_uri_for(folder, self.app)
-        marker = _state_marker_for(local, remote)
-        timeout = self._job_timeout(folder)
-
-        local.mkdir(parents=True, exist_ok=True)
-
-        if not await self._ensure_remote_dir(remote, folder.name, timeout=timeout):
-            return False
-
         cmd = self._base_cmd() + ["bisync", str(local), remote]
         # Resolução de conflitos: vence quem foi modificado por último.
         cmd += ["--conflict-resolve", "newer", "--conflict-loser", "delete"]
@@ -625,6 +616,32 @@ class RcloneEngine:
                     seen.add(pat)
         for pat in excludes:
             cmd += ["--exclude", pat]
+        return cmd
+
+    async def bisync_folder(
+        self,
+        folder: FolderConfig,
+        local_override: Path | None = None,
+        extra_excludes: list[str] | None = None,
+    ) -> bool:
+        """Executa bisync para uma tarefa. Retorna True em sucesso.
+
+        extra_excludes (ADR-008): padrões adicionais injetados pelo daemon em
+        modo `auto` — paths de repos descobertos viram excludes para que o
+        bisync cubra só conteúdo não-repo (skip excluído do sync; bundle
+        sincronizado em flow separado).
+        """
+        local = local_override or folder.local_path
+        remote = remote_uri_for(folder, self.app)
+        marker = _state_marker_for(local, remote)
+        timeout = self._job_timeout(folder)
+
+        local.mkdir(parents=True, exist_ok=True)
+
+        if not await self._ensure_remote_dir(remote, folder.name, timeout=timeout):
+            return False
+
+        cmd = self.build_bisync_cmd(folder, local, remote, extra_excludes)
 
         # Primeira execução: precisa de --resync.
         if not marker.exists():
