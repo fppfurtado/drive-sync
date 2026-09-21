@@ -22,7 +22,13 @@ from pathlib import Path
 
 from .config import AppConfig, FolderConfig
 from .listing_diff import Divergence, ListingParseError, classify_dry_run
-from .sync_engine import RcloneEngine, _run, remote_uri_for
+from .sync_engine import (
+    AuthDegradedError,
+    RcloneEngine,
+    StuckJobError,
+    _run,
+    remote_uri_for,
+)
 
 # Limite de paths listados por seção no relatório (o resto vira "… e mais N").
 _MAX_SHOWN = 20
@@ -99,7 +105,11 @@ async def _classify(
     cmd = engine.build_bisync_cmd(folder, folder.local_path, remote)
     cmd += ["--resync", "--dry-run", "--workdir", str(workdir)]
 
-    rc, _out, err = await _run(cmd)
+    # Teto de runtime pelo mesmo knob do daemon (ADR-018/#45): um job rclone pode
+    # pendurar indefinidamente — o incidente que motivou o ADR segurou o lock 14h.
+    # Sem teto, um uso scriptado (o exit code é contrato) travaria para sempre.
+    timeout = engine._job_timeout(folder)  # noqa: SLF001
+    rc, _out, err = await _run(cmd, timeout=timeout)
     try:
         div = classify_dry_run(workdir)
     except ListingParseError as exc:
@@ -128,6 +138,24 @@ def run_dry_run_resync(cfg: AppConfig, folder_name: str) -> int:
     with tempfile.TemporaryDirectory(prefix="drive-sync-dryrun-") as tmp:
         try:
             remote, div = asyncio.run(_classify(cfg, folder, Path(tmp)))
+        except AuthDegradedError as exc:
+            # NUNCA cair no exit 1: esse código significa "TEM OVERWRITE" e um
+            # script o leria como veredito de divergência destrutiva. Uma falha de
+            # auth não é veredito algum — é ausência de veredito (exit 2).
+            print(
+                f"erro: autenticação degradada ({exc}) — nenhum veredito produzido.\n"
+                "Recupere a auth primeiro (ADR-003: `rclone config reconnect proton:` "
+                "+ restart, ou aguarde, conforme o kind) e rode de novo."
+            )
+            return 2
+        except StuckJobError as exc:
+            print(
+                f"erro: o dry-run excedeu o teto de runtime ({exc}) e foi morto — "
+                "nenhum veredito produzido.\n"
+                "Aumente `rclone.max_job_runtime_seconds` (ou o override do folder) "
+                "se o folder é legitimamente grande."
+            )
+            return 2
         except DryRunResyncError as exc:
             print(f"erro: {exc}")
             return 2
