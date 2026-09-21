@@ -61,13 +61,22 @@ rclone lsl proton:Sync/ > ~/.local/state/drive-sync/snapshots/pre-recovery-$(dat
 
 O estado `.lst` morreu, mas os dados locais e remotos estão intactos. Recuperação = reconstruir o baseline.
 
-**Pré-check de integridade** (confirma que é o caso benigno — as árvores batem, não há divergência real):
+**Pré-check de integridade** (confirma que é o caso benigno — o resync não destrói nada):
 
 ```bash
-# Compare o top-level dos dois lados. Se baterem, o resync será um rebuild de 0 deleções.
-rclone lsf --dirs-only <remote>:<remote_root>/<remote_subpath> | sort   # Path2
-ls -1 <local_path> | sort                                              # Path1
+drive-sync --dry-run-resync <folder>
 ```
+
+Roda o `--resync --dry-run` com os flags/excludes **exatos do daemon** (mesma fonte que `bisync_folder` usa) num workdir temporário — o cache real fica intocado — e classifica a divergência lendo os listings dos dois lados:
+
+- **`VEREDITO: união NO-OP`** ou **`VEREDITO: SÓ-ADIÇÕES`** → **data-safe**, siga para a recuperação abaixo. Nenhum arquivo existe nos dois lados com conteúdo divergente, então o resync apenas cria.
+- **`VEREDITO: TEM OVERWRITE`** → **NÃO é data-safe.** Os paths listados existem nos dois lados divergentes; o resync sobrescreveria o lado perdedor, destruindo aquela versão. Trate como o [caso rc=1](#recuperação-rc1--too-many-deletes-perigoso): decida a direção conscientemente.
+
+Exit code para scripting: `0` seguro · `1` tem overwrite · `2` erro.
+
+> **Por que não comparar o top-level à mão.** A versão anterior deste passo mandava comparar `rclone lsf --dirs-only` com `ls -1` — só diretórios, só o primeiro nível. No incidente do `areas` (#92) a divergência estava **quatro níveis abaixo** (`caldav/collections/.git/objects/…`) e esse pré-check teria passado trivialmente, sem tocar na pergunta que de fato decide.
+>
+> **E por que o texto do log não basta.** Medido em sandbox (rclone v1.74.3): o `--resync` **nunca deleta** — um arquivo removido de um lado é *restaurado* a partir do outro. O perigo real é o **overwrite** de um arquivo divergente nos dois lados, que o log emite como `Skipped copy as --dry-run is set` — indistinguível de uma adição inofensiva. Os listings carregam a distinção que o log perdeu; por isso o veredito vem deles.
 
 **Recuperação** (deixe o daemon disparar `--resync` com os flags/excludes exatos e ao vivo — ver [Apêndice: o marker](#apêndice--como-o-marker-controla-o-resync)):
 
@@ -85,7 +94,7 @@ systemctl --user start drive-sync.service
 systemctl --user start drive-sync-watchdog.timer   # se você o parou
 ```
 
-Verifique a [recuperação](#verificação-comum). Se o pré-check de integridade **não** bateu (divergência real, não só estado perdido), trate como o caso rc=1 too-many-deletes abaixo — decida a direção conscientemente.
+Verifique a [recuperação](#verificação-comum). Se o pré-check acusou **`TEM OVERWRITE`** (divergência real, não só estado perdido), trate como o caso rc=1 too-many-deletes abaixo — decida a direção conscientemente.
 
 ---
 
