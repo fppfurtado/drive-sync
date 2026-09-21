@@ -46,6 +46,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Dead-man's-switch externo (ADR-014): checa serviço/STATUS/markers, "
              "alerta via notify-send e sai (0 saudável, 1 problemas).",
     )
+    mode.add_argument(
+        "--dry-run-resync",
+        metavar="FOLDER",
+        help="Diagnóstico (#94): roda `--resync --dry-run` no folder e classifica a "
+             "divergência lendo os listings — só-adições (data-safe) vs tem "
+             "overwrite (destrutivo). Não muta nada. Sai 0 seguro, 1 overwrite, 2 erro.",
+    )
     return p
 
 
@@ -98,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.watchdog:
         from .watchdog import run_watchdog
         return run_watchdog(cfg)
+
+    if args.dry_run_resync:
+        from .dry_run_resync import run_dry_run_resync
+        return run_dry_run_resync(cfg, args.dry_run_resync)
 
     daemon = SyncDaemon(cfg)
 
