@@ -10,6 +10,13 @@ Wants=network-online.target
 # Type=notify + NotifyAccess=main exigidos para sd_notify STATUS=/READY=1 (ADR-003).
 Type=notify
 NotifyAccess=main
+# Janela até o READY=1 (#97). O default do user manager no Fedora é 45s
+# (DefaultTimeoutStartSec, "Shorter Shutdown Timer"), e o daemon leva 41-44s
+# para sinalizar READY: o startup_delay_seconds (sleep de rede) + ~12-15s do
+# observer.start() do inotify. Com 1-3s de margem, 28% dos starts estouravam,
+# e no boot (cache frio) virava loop de restart. 120s cobre o boot com folga
+# e ainda pega uma trava real.
+TimeoutStartSec=120
 ExecStart=%h/.local/bin/drive-sync
 # Reinício automático em falha — backoff progressivo evita loop quente.
 Restart=on-failure
