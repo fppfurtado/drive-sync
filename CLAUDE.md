@@ -23,7 +23,7 @@ journalctl --user -u drive-sync -f
 Para atualizar pós `git pull` (ritual self-update, ADR-009):
 
 ```bash
-bash scripts/update.sh           # git pull --ff-only + systemctl --user restart drive-sync
+bash scripts/update.sh           # git pull --ff-only + re-instala units alteradas (#102) + restart
 ```
 
 **Migração one-shot** (uma vez por host, pós-merge de ADR-009): se você tinha drive-sync instalado pelo `install.sh` pré-ADR-009 (modo snapshot, sem `-e`), rode `bash scripts/install.sh` uma vez para aplicar `-e --force` retroativamente — entry-point idempotente cobre o caso (mesmo caminho que fresh install). Confirmação: `pipx list` mostra `drive-sync` sem warning `symlink missing or pointing to unexpected location`; `which drive-sync` retorna symlink (não arquivo regular).
