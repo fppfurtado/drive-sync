@@ -32,11 +32,9 @@ fi
 
 # 3) Instala as units do systemd --user (daemon + watchdog ADR-014)
 say "Instalando units systemd --user..."
-mkdir -p "$SYSTEMD_USER_DIR"
-cp "$PROJECT_DIR/systemd/drive-sync.service" "$SYSTEMD_USER_DIR/"
-cp "$PROJECT_DIR/systemd/drive-sync-watchdog.service" "$SYSTEMD_USER_DIR/"
-cp "$PROJECT_DIR/systemd/drive-sync-watchdog.timer" "$SYSTEMD_USER_DIR/"
-systemctl --user daemon-reload
+# shellcheck source=scripts/lib-units.sh
+source "$PROJECT_DIR/scripts/lib-units.sh"
+sync_units "$PROJECT_DIR" "$SYSTEMD_USER_DIR"
 
 # 4) Habilita lingering para o serviço subir antes do login (boot do SO)
 if ! loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then

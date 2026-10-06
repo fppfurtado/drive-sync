@@ -33,6 +33,8 @@ git pull --ff-only
 systemctl --user restart drive-sync.service
 ```
 
+_Emenda (#102, 2026-10-06): as units systemd são **cópias** em `~/.config/systemd/user/`, não symlinks — sem re-cópia, mudança em `systemd/*` nunca chegava ao host. Entre o pull e o restart, `update.sh` agora roda `sync_units` (`scripts/lib-units.sh`, compartilhado com `install.sh`): copia as units divergentes, faz `daemon-reload` se alguma mudou e reinicia o timer do watchdog se ele mudou._
+
 **(3) Modo dev separado em CLAUDE.md é eliminado.** Editable cobre live-reflect que era a única razão do venv local; seção "Development Workflow" do CLAUDE.md removida pelo Bloco 3 do plano consumidor. Decisão registra side-effect doutrinário relevante (warning sobre `pip install -e .` contra Python de sistema some junto — vetor L13 eliminado estruturalmente).
 
 Razões:
