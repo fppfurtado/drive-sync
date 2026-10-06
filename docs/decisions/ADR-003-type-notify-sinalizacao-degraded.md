@@ -15,7 +15,7 @@ Em 2026-05-11 o daemon acumulou 292 ocorrências de `Code=8002` (falha de auth d
 A unit atual ([scripts/install.sh](../../scripts/install.sh), template renderizado em `~/.config/systemd/user/drive-sync.service`) usa `Type=simple`. Sob `Type=simple`, o systemd não escuta `sd_notify` (`NotifyAccess=none` por default) — qualquer `STATUS=` enviado é descartado silenciosamente. Para o canal funcionar, a unit precisa:
 
 1. Mudar para `Type=notify` (ou ativar `NotifyAccess=main` em `Type=simple`, mas `Type=notify` é o padrão idiomático e permite mais sinais — `READY=1`, `RELOADING=1`, `STOPPING=1`).
-2. Sob `Type=notify`, o systemd considera o serviço `activating` até receber `READY=1`. Se o daemon não enviar `READY=1` (ou o bootstrap crashar antes), `systemctl start` trava no timeout default (`TimeoutStartSec=1min30s`).
+2. Sob `Type=notify`, o systemd considera o serviço `activating` até receber `READY=1`. Se o daemon não enviar `READY=1` (ou o bootstrap crashar antes), `systemctl start` trava no timeout default (`TimeoutStartSec=1min30s`). _Correção (#97, 2026-10-06): no Fedora o default do user manager é **45s** (`DefaultTimeoutStartSec`, mudança "Shorter Shutdown Timer"), não 1min30s. Com o daemon levando 41–44s até o `READY=1`, 28% dos starts estouravam; a unit agora fixa `TimeoutStartSec=120` explicitamente. A posição do `ready()` não muda._
 
 A escolha de `Type=notify` introduz uma dependência operacional nova: o caminho-feliz do `SyncDaemon.run()` precisa emitir `READY=1` ao final do bootstrap (após watcher iniciado e fila inicial preenchida). Falha em emitir não é silenciosa — vira timeout de start visível ao operador.
 
