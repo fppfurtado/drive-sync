@@ -113,7 +113,7 @@ The reference config at [config/config.yaml.example](config/config.yaml.example)
 - Tracker (trabalho aberto): **GitHub Issues** (`gh issue list`, label `backlog`) — migrado do `BACKLOG.md § Próximos` em 2026-08-24 (issues #35–#47). Filar novo item: `gh issue create` ou `/backlog capture`.
 - Backlog: `BACKLOG.md` — `## Próximos` é só um ponteiro para o GitHub Issues; `## Concluídos` permanece como memória institucional (do not prune).
 
-<!-- agent-kit operational-floor v13 — single source: agent-kit/onboarding/operational-floor.md
+<!-- agent-kit operational-floor v17 — single source: agent-kit/onboarding/operational-floor.md
      Copy this whole block into your repo's own AGENTS.md / CLAUDE.md, below your own content.
      Extend BELOW the closing marker; never edit INSIDE the block. Re-copy when the version bumps.
      This block is a SHIPPED ASSET: it stays English-as-shipped regardless of your repo's `## Language`
@@ -145,7 +145,26 @@ The reference config at [config/config.yaml.example](config/config.yaml.example)
      session's landed work (#888). v13 (2026-09-01) adds the liveness half to the Concurrency-check rung: a
      foreign `.worktrees/<slug>` is presumed live until a positive death signal, and a positive liveness
      probe (`lsof +D` / `/proc/*/cwd`) precedes any destructive action on it — landing-absence (unpushed/no
-     PR) is in-progress work, not death (#1210).
+     PR) is in-progress work, not death (#1210). v14 (2026-09-04) adds the Prod-data-mutation rung:
+     mutating production data outside a modeled event type forces a same-cycle disposition of the state's
+     classification AND a sweep of the surfaces that render it (agent-kit#1256; evidence expedidor #296/#299
+     + pje scripts-judiciais). This rung is ADOPTER-FACING and inverts the distillation direction of every
+     other rung — it has NO maintainer root-floor counterpart, because the maintainer repo has no production
+     data (the rung would never fire here); it originates in this block for the repos-with-prod-data that
+     vendor it. So the faithfulness baseline does not apply to it (there is nothing upstream to be faithful to).
+     v15 (2026-09-15) adds a bare `spec.md` and the default `specs/` home to the hand-scan spec-file list of
+     the Declare-the-route rung, matching what the tools resolve (agent-kit#1100, #1106).
+     v16 (2026-09-27) adds the agent harness's own memory/notes store to the Cycle-close capture sweep's
+     NOT-durable list. It is the hardest of that list to see: unlike chat or an ephemeral summary it
+     genuinely persists and may load automatically, which is exactly why it reads as a disposition — but it
+     is harness-private, so no repo-side check, audit, sweep or other harness can see what it holds
+     (agent-kit#2209; evidence: 190 records accumulated in one such store, 86% of them transferable method,
+     with only 18% of the method ones citing any repo home).
+     v17 (2026-10-13) makes FIXED expressible in the Cycle-close capture sweep: a finding fixed in-flow is
+     no longer excluded from the ledger but recorded as fixed, naming the fix, and "fixed in this cycle" joins
+     the durable dispositions — before, the only named outcomes were a filed item or a reason it needs none,
+     so a fixed finding read like nothing surfaced or got filed to have something to write. An open cure or
+     an unverified change to an agent instruction is never "fixed" (agent-kit#2316, arc #1851).
      This generic block intentionally omits the maintainer-internal
      release/attestation rungs (a per-PR method self-check, issue-close-evidence, the PR attestation
      lines, and release-due surfacing for published units) — they depend on maintainer-specific tooling
@@ -205,7 +224,7 @@ with or without it.
   Before committing a "lightweight build, skip Spec" route, check whether an existing frozen Spec already
   governs the code the change touches — a throughline install ships the deterministic scan
   (`spec_surface.py match --repo . --paths <touched files>`); without it, scan the repo's spec files
-  (`spec-*.md` / `spec_*.md` / `*.spec.md`) by hand. One found → the route defaults to *amend that Spec*, not skip it.
+  (`spec-*.md` / `spec_*.md` / `*.spec.md` / a bare `spec.md` / any `.md` under `specs/`) by hand. One found → the route defaults to *amend that Spec*, not skip it.
 - **PR-per-cycle; the agent never merges.** <!-- rung:pr-per-cycle-the-agent-never-merges --> Every cycle lands via a pull/merge request off the feature
   branch — never a direct push to the default branch. The agent stops at a merge-ready PR (checks green,
   review attested) and hands off; the **human performs the merge** (the terminal, least-reversible step).
@@ -219,17 +238,25 @@ with or without it.
   create the directory if absent and keep it gitignored (a
   `.throughline/.gitignore` carrying `/dossiers/`); it is a CONVENTION, not a tool dependency — with no
   throughline install, any gitignored session-notes file serves the same role. A line is owed when the
-  finding is not already tracked, outlives the session or names a class, and was not fixed in-flow with
-  zero class-residue — so the close sweep reads a FILE, never working memory. Before removing the
+  finding is not already tracked and outlives the session or names a class — one you fixed in-flow too,
+  marked fixed with the fix named — so the close sweep reads a FILE, never working memory. Before removing the
   session worktree, sweep the ledger's lines to their dispositions (or copy the file out) — a bare
   worktree removal deletes it. At the close of ANY session — a landing cycle OR a
   landing-free analysis/review/hygiene pass that lands nothing — sweep the ledger PLUS any follow-ups, drifts, and gaps recalled at close (the ledger augments the
   sweep's feed, it never bars a late entry) and
   dispose each **per item, to a durable surface**: enumerate each surfaced follow-up (an odd-class one — a
-  one-off "run `X`" mechanical step — counts too) and name where it durably lands (a filed tracker item, or a
-  recorded reason it needs none), never swallowed — whether or not the session lands. An **aggregate** "all
+  one-off "run `X`" mechanical step — counts too) and name where it durably lands (fixed in this cycle,
+  naming the fix; a filed tracker item; or a recorded reason it needs none), never swallowed — whether or
+  not the session lands. Two things are never "fixed": a finding whose fix is still an open choice, and a
+  change to how an agent judges (a prompt, skill, or instruction edit) not yet verified to behave as
+  intended — file those. Fixing one instance of a wider class is fixed AND filed for the class. An **aggregate** "all
   handled" and a mention in **chat, an ephemeral close summary, or un-attested prose** are NOT durable
-  dispositions: reasoning over the class lets an odd-class item slip and land nowhere. A landing cycle records
+  dispositions: reasoning over the class lets an odd-class item slip and land nowhere. **Nor does your
+  agent harness's own memory/notes store suffice** — it is the hardest of these to see, because unlike the
+  others it genuinely persists and may be loaded automatically, which is exactly why it reads as a
+  disposition. It is harness-private: no repo-side check, audit, sweep or other harness can see what it
+  holds, so a finding disposed only there discharges nothing this floor can verify. Write it there as
+  **well** if your harness offers one; it does not stand **instead** of a durable surface. A landing cycle records
   each where the change lands; a landing-free pass records each in the pass's own output.
 - **Verify before any destructive action.** <!-- rung:verify-before-any-destructive-action --> Before `rm` / overwrite / `clean`, verify the target against
   the real tree (tracked-files / status / an explicit path check) — never a bare directory listing, which
@@ -240,6 +267,19 @@ with or without it.
   archiving freezes the remote history read-only — verify `HEAD == @{u}` and a clean tree (nothing
   load-bearing untracked or uncommitted) BEFORE archiving, else the backstop freezes incomplete history
   and "delete-because-backed-up" stops being true.
+- **Prod-data mutation — classify + sweep render surfaces.** <!-- rung:prod-data-mutation-classify-sweep-render-surfaces --> Same high-blast-radius
+  class as the rung above, distinct obligation. The moment a session mutates PRODUCTION data outside a
+  modeled event type — a reconciliation, a backfill, a mass correction, any raw surgery against the store
+  instead of the domain's modeled flow (additive inserts AND overwriting corrections alike) — surface it IN
+  THE SAME CYCLE, before the effects reach any rendering surface, for conscious disposition of TWO coupled
+  outputs: (a) the **classification/mark** of the mutated state — what modeled kind of event is this, or is
+  it explicitly synthetic? (a fictional submitter / non-domain origin is the tell it is unmodeled) — and
+  (b) a **render-surface sweep** — enumerate EVERY projection / feed / ledger / report that renders this data
+  and how the mutation appears in each; a surface with no class distinguishing a data-adjustment from an
+  organic operation is a leak to flag NOW, not after it ships. NEVER auto-classify or auto-suppress (surface
+  for conscious disposition); fire ONLY on a genuine prod-data mutation outside a modeled type — not on an
+  ordinary modeled write through the domain flow, nor in a repo with no production data — else the reflex is
+  noise.
 
 **The methodology.** The full working cycle is **throughline** — one guided front door (**frame** the
 problem) → solution design → **build** → **review** — available as installed agent skills. Bring a problem
@@ -253,7 +293,7 @@ throughline-built code (use the land-gate CI recipe your throughline install shi
 protection. These are per-harness / per-platform add-ons, not a dependency of the norm — where they are
 absent, the self-checks still bind.
 
-<!-- /agent-kit operational-floor v13 -->
+<!-- /agent-kit operational-floor v17 -->
 <!-- agent-kit session-boundary ritual v13 — single source: agent-kit/onboarding/session-boundary-ritual.md
      OPERATOR-PERSONAL extension (it names my own ecosystem tools — mneme, backlog, and the
      agent-kit substrate itself — and is agent-kit-local, never published to strangers). Copy this whole
