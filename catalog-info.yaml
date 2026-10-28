@@ -6,12 +6,8 @@ metadata:
     constelacao.io/cluster: env-stack
     constelacao.io/camada: substrate
     constelacao.io/hub: github:fppfurtado/meta-system
-    constelacao.io/edges: |
-      [{"to": "component:default/agent-kit", "edgeType": "cc-plugin"}]
 spec:
   type: service
   lifecycle: production
   owner: fppfurtado
   system: env-stack
-  dependsOn:
-    - component:default/agent-kit
